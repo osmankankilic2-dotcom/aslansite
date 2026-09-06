@@ -86,7 +86,7 @@ class handler(BaseHTTPRequestHandler):
 
             # Call Groq API
             groq_payload = json.dumps({
-                "model": "llama-3.3-70b-versatile",
+                "model": "groq/compound-mini",
                 "messages": [
                     {"role": "system", "content": "Sen aslan AI'sin. Kibar, bilgili ve samimi bir yapay zeka asistanısın. Türkçe yanıt veriyorsun."},
                     {"role": "user", "content": message}
@@ -114,7 +114,7 @@ class handler(BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": f"Groq API hatası: {e.code}"}).encode('utf-8'))
+                self.wfile.write(json.dumps({"error": f"Groq API hatası: {e.code} - {error_body[:200]}"}).encode('utf-8'))
                 return
 
             self.send_response(200)
