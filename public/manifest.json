@@ -1,0 +1,23 @@
+{
+  "name": "ASLAN Technologies",
+  "short_name": "ASLAN",
+  "description": "Ses Stüdyosu, Aslan AI Multimodal Asistan, Görsel Üretimi ve Medya İşleme Platformu",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#090b10",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/assets/favicon.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    }
+  ]
+}

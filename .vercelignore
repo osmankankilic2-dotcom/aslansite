@@ -1,0 +1,15 @@
+server.py
+server_dbg.py
+server.log
+start.sh
+test_suite.py
+test_suite_u2.py
+test_security_and_api.py
+README.md
+__pycache__/
+*.pyc
+*.pyo
+.env*
+.git/
+.DS_Store
+data/

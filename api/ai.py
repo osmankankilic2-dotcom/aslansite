@@ -1,140 +1,194 @@
-from http.server import BaseHTTPRequestHandler
-import json
+"""
+Vercel sunucusuz fonksiyonu: Aslan AI Asistan.
+
+Zorunlu kullanici dogrulamasi (401), hesaba bagli kalici DB kotasi,
+ucretsiz acik uclar oncelikli + Gemini son durak zinciri ve otonom eylemler.
+"""
+import base64
+import mimetypes
 import os
-import time
-import hashlib
-import urllib.request
+import sys
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 
-# Rate limiting: daily 8 requests per IP
-RATE_LIMIT = 8
-RATE_WINDOW = 86400  # 24 hours in seconds
-RATE_FILE = "/tmp/ai_rate_limits.json"
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-def get_client_ip(handler):
-    forwarded = handler.headers.get('X-Forwarded-For', '')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return handler.client_address[0]
+from core import ai_engine, api_utils, auth, config as cfg, database, pipeline, quota as quota_mod
 
-def check_rate_limit(ip):
-    try:
-        if os.path.exists(RATE_FILE):
-            with open(RATE_FILE, 'r') as f:
-                data = json.load(f)
-        else:
-            data = {}
-    except:
-        data = {}
+cfg.ensure_dirs()
+AI_DAILY_LIMIT = cfg.AI_DAILY_LIMIT
 
-    now = time.time()
-    if ip not in data:
-        data[ip] = {'count': 0, 'start': now}
-
-    entry = data[ip]
-    if now - entry['start'] > RATE_WINDOW:
-        entry = {'count': 0, 'start': now}
-
-    if entry['count'] >= RATE_LIMIT:
-        return False, entry['count']
-
-    entry['count'] += 1
-    data[ip] = entry
-
-    try:
-        with open(RATE_FILE, 'w') as f:
-            json.dump(data, f)
-    except:
-        pass
-
-    return True, entry['count']
 
 class handler(BaseHTTPRequestHandler):
+    """Aslan AI sohbet ucu (giris zorunlu + multimodal + otonom eylemler)."""
+
+    def _decode_part(self, entry, index=0):
+        path, meta = pipeline.decode_inline_file(entry, index)
+        if not path:
+            return None, None
+        return path, meta
+
     def do_POST(self):
+        paths = []
+        created_outputs = []
         try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
-
-            message = data.get('message', '').strip()
-            if not message:
-                self.send_response(400)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Mesin boş"}).encode('utf-8'))
+            if api_utils.reject_disallowed_origin(self.headers):
+                api_utils.send_json(self, 403, {'error': 'Kaynak izni reddedildi.'},
+                                    methods='POST, OPTIONS')
                 return
 
-            ip = get_client_ip(self)
-            allowed, count = check_rate_limit(ip)
+            # Zorunlu erisim kontrolu: giris yapmamis kullanici AI kullanamaz
+            user, _ = auth.authenticate_request(self.headers)
+            if not user:
+                api_utils.send_json(self, 401, {
+                    'error': 'Aslan AI sohbetini kullanmak için giriş yapmalısınız.',
+                    'auth_required': True,
+                }, methods='POST, OPTIONS')
+                return
 
+            raw, err_status, err_msg = api_utils.read_body_limited(
+                self.rfile, self.headers, max_bytes=cfg.MAX_JSON_BODY_BYTES)
+            if err_status:
+                api_utils.send_json(self, err_status, {'error': err_msg}, methods='POST, OPTIONS')
+                return
+
+            data = api_utils.json_body(raw, {})
+            message = str(data.get('message', '') or '').strip()
+            if len(message) > cfg.MAX_MESSAGE_CHARS:
+                api_utils.send_json(
+                    self, 400,
+                    {'error': 'Mesaj en fazla %d karakter olabilir.' % cfg.MAX_MESSAGE_CHARS},
+                    methods='POST, OPTIONS',
+                )
+                return
+
+            files_inline = data.get('files') or []
+            history = data.get('history') or []
+
+            metas = []
+            for i, entry in enumerate(files_inline):
+                path, meta = self._decode_part(entry, i)
+                if path:
+                    paths.append(path)
+                    metas.append(meta)
+
+            if not message and not paths:
+                api_utils.send_json(self, 400, {'error': 'Mesaj veya dosya bos'},
+                                    methods='POST, OPTIONS')
+                return
+
+            # Hesaba bagli kalici DB kota kontrolu (harcamadan once kontrol)
+            uname_lower = user['username_lower']
+            allowed, usage = database.check_user_ai_quota(uname_lower)
             if not allowed:
-                self.send_response(429)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "error": "Günlük 8 mesaj limitine ulaşıldı. Yarın tekrar deneyin.",
-                    "remaining": 0
-                }).encode('utf-8'))
+                snap = database.user_quota_snapshot(user)
+                api_utils.send_json(
+                    self, 429,
+                    {
+                        'error': ('Gunluk %d mesaj hakkiniz doldu. Hakkiniz %d saniye sonra yenilenir.'
+                                  % (AI_DAILY_LIMIT, usage.get('reset_in', 0))),
+                        'remaining': 0,
+                        'quota': snap,
+                    },
+                    methods='POST, OPTIONS',
+                )
                 return
 
-            api_key = os.environ.get('GROQ_API_KEY', '')
-            if not api_key:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "API anahtarı yapılandırılmamış"}).encode('utf-8'))
+            ip = api_utils.client_ip(self.headers)
+            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                ip, 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
+            if not ip_ok:
+                api_utils.send_json(
+                    self, 429,
+                    {'error': 'Bu agdan gunluk istek sinirina ulasildi. Lutfen %d saniye sonra tekrar deneyin.'
+                              % ip_usage.get('reset_in', 60)},
+                    methods='POST, OPTIONS',
+                )
                 return
 
-            # Call Groq API
-            groq_payload = json.dumps({
-                "model": "groq/compound-mini",
-                "messages": [
-                    {"role": "system", "content": "Sen aslan AI'sin. Kibar, bilgili ve samimi bir yapay zeka asistanısın. Türkçe yanıt veriyorsun."},
-                    {"role": "user", "content": message}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 1024
-            }).encode('utf-8')
+            parts = []
+            for meta in metas:
+                try:
+                    blob = Path(meta['path']).read_bytes()
+                except Exception:
+                    continue
+                mime_type = (
+                    meta.get('mime_type')
+                    or mimetypes.guess_type(meta.get('name', ''))[0]
+                    or 'application/octet-stream'
+                )
+                if (mime_type.startswith(('image/', 'video/', 'audio/'))
+                        or mime_type == 'application/pdf'):
+                    parts.append({'inline_data': {
+                        'mime_type': mime_type,
+                        'data': base64.b64encode(blob).decode('utf-8'),
+                    }})
+                elif (mime_type.startswith('text/')
+                      or mime_type in ('application/json', 'text/csv')):
+                    parts.append({'text': '[Dosya icerigi: %s]\n%s'
+                                  % (meta['name'], blob.decode('utf-8', errors='ignore'))})
+                else:
+                    parts.append({'text': '[Desteklenmeyen dosya turu: %s (%s)]'
+                                  % (meta['name'], mime_type)})
 
-            req = urllib.request.Request(
-                "https://api.groq.com/openai/v1/chat/completions",
-                data=groq_payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
+            reply, error = ai_engine.generate_reply(
+                message, parts=parts, available_files=metas,
+                api_key=ai_engine.get_api_key(), history=history)
+            if not reply:
+                api_utils.send_json(
+                    self, 502,
+                    {'error': api_utils.safe_error_message(error, 'Yanit alinamadi')},
+                    methods='POST, OPTIONS',
+                )
+                return
+
+            # Yalnizca basarili yanit sonrasi hesaptan 1 hak dusulur
+            _, usage = database.consume_user_ai_quota(uname_lower)
+
+            media_result = None
+            image_result = None
+            action = ai_engine.extract_action(reply)
+            if action:
+                clean_reply = ai_engine.strip_action(reply)
+                action = dict(action)
+                if not action.get('files'):
+                    action['files'] = [m['id'] for m in metas]
+                media_result = ai_engine.run_action(
+                    action, uploaded_files=metas, username_lower=uname_lower)
+                if isinstance(media_result, dict):
+                    out_name = media_result.get('output_file')
+                    if out_name and out_name != 'aslan-gorsel.png':
+                        created_outputs.append(os.path.join(cfg.MEDIA_TEMP_DIR, os.path.basename(out_name)))
+                    if media_result.get('operation') == 'generate_image' and media_result.get('success'):
+                        image_result = media_result
+                    if media_result.get('success'):
+                        reply = clean_reply or 'Islem tamamlandi.'
+
+            fresh_user = database.get_user_by_username(uname_lower) or user
+            snap = database.user_quota_snapshot(fresh_user)
+            api_utils.send_json(
+                self, 200,
+                {
+                    'reply': reply,
+                    'remaining': usage['remaining'],
+                    'quota': snap,
+                    'media_result': media_result,
+                    'image_result': image_result,
                 },
-                method="POST"
+                methods='POST, OPTIONS',
             )
-
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    groq_response = json.loads(resp.read().decode('utf-8'))
-                    reply = groq_response.get('choices', [{}])[0].get('message', {}).get('content', 'Yanıt alınamadı.')
-            except urllib.error.HTTPError as e:
-                error_body = e.read().decode('utf-8')
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": f"Groq API hatası: {e.code} - {error_body[:200]}"}).encode('utf-8'))
-                return
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "reply": reply,
-                "remaining": RATE_LIMIT - count
-            }).encode('utf-8'))
-
         except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+            api_utils.send_json(
+                self, 500, {'error': api_utils.safe_error_message(e)},
+                methods='POST, OPTIONS',
+            )
+        finally:
+            pipeline.cleanup_files(paths + created_outputs)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+        api_utils.send_options(self, methods='POST, OPTIONS')
+
+    def log_message(self, format, *args):
+        pass

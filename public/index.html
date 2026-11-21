@@ -1,0 +1,2753 @@
+<!DOCTYPE html>
+<html lang="tr" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASLAN Technologies — Ses Stüdyosu, Aslan AI &amp; Medya Stüdyosu</title>
+    <meta name="description" content="ASLAN Technologies: Türkçe ve İngilizce yapay zeka seslendirme (TTS), multimodal Aslan AI asistanı, görsel üretimi ve FFmpeg tabanlı medya işleme platformu.">
+    <meta name="theme-color" content="#090b10">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="ASLAN Technologies — Ses, Yapay Zeka ve Medya Stüdyosu">
+    <meta property="og:description" content="Metinden sese dönüştürme, Aslan AI multimodal asistan, görsel üretimi ve profesyonel medya işleme araçları.">
+    <meta property="og:locale" content="tr_TR">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="ASLAN Technologies">
+    <meta name="twitter:description" content="Ses Stüdyosu · Aslan AI Multimodal Asistan · Medya Stüdyosu">
+    <link rel="icon" type="image/png" href="/assets/favicon.png">
+    <link rel="apple-touch-icon" href="/assets/icon-192.png">
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        :root, [data-theme="dark"] {
+            --bg: #090b10;
+            --bg-elevated: #0e121a;
+            --card: #131823;
+            --card2: #19202e;
+            --accent: #dc2626;
+            --accent-hover: #ef4444;
+            --accent-glow: rgba(220, 38, 38, 0.28);
+            --accent2: #991b1b;
+            --silver: #cbd5e1;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --muted2: #cbd5e1;
+            --success: #16a34a;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --border: #262f40;
+            --border2: #3b465c;
+            --bot-bg: #171e2d;
+            --bot-text: #e2e8f0;
+            --code-bg: #05070b;
+            --link: #fca5a5;
+            --shadow: 0 14px 36px rgba(0, 0, 0, .52);
+        }
+        [data-theme="light"] {
+            --bg: #f1f5f9;
+            --bg-elevated: #ffffff;
+            --card: #ffffff;
+            --card2: #f8fafc;
+            --accent: #b91c1c;
+            --accent-hover: #dc2626;
+            --accent-glow: rgba(185, 28, 28, 0.16);
+            --accent2: #7f1d1d;
+            --silver: #475569;
+            --text: #0f172a;
+            --muted: #64748b;
+            --muted2: #334155;
+            --success: #15803d;
+            --warn: #d97706;
+            --danger: #dc2626;
+            --border: #cbd5e1;
+            --border2: #94a3b8;
+            --bot-bg: #fef2f2;
+            --bot-text: #1e293b;
+            --code-bg: #0f172a;
+            --link: #b91c1c;
+            --shadow: 0 8px 24px rgba(15, 23, 42, .08);
+        }
+        * { box-sizing: border-box; }
+        body {
+            background-color: var(--bg);
+            background-image:
+                radial-gradient(circle at 18% 0%, var(--accent-glow) 0%, transparent 42%),
+                linear-gradient(180deg, rgba(255,255,255,0.015) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+            background-size: 100% 100%, 38px 38px, 38px 38px;
+            color: var(--text);
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            line-height: 1.55;
+            -webkit-text-size-adjust: 100%;
+            transition: background-color .2s, color .2s;
+        }
+        a { color: var(--link); }
+        button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible {
+            outline: 2px solid var(--accent-hover);
+            outline-offset: 2px;
+        }
+
+        /* ============ TOAST NOTIFICATIONS ============ */
+        #toast-container {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 1300;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: 370px;
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: var(--card);
+            color: var(--text);
+            border: 1px solid var(--border2);
+            border-left: 4px solid var(--accent);
+            border-radius: 10px;
+            padding: 11px 14px;
+            font-size: 13.5px;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            animation: slideIn .18s ease-out;
+        }
+        .toast.success { border-left-color: var(--success); }
+        .toast.error { border-left-color: var(--danger); }
+        .toast.warn { border-left-color: var(--warn); }
+        .toast button {
+            background: none; border: none; color: var(--muted);
+            cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ============ COOKIE CONSENT BANNER (2 buton: Kabul Et & Yonet) ============ */
+        #cookie-banner {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            background: var(--bg-elevated);
+            border-top: 2px solid var(--accent);
+            padding: 14px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 14px;
+            box-shadow: 0 -10px 32px rgba(0, 0, 0, .55);
+        }
+        #cookie-banner.hidden { display: none !important; }
+        #cookie-banner .cookie-text {
+            color: var(--muted2);
+            font-size: 13.5px;
+            flex: 1 1 420px;
+            min-width: 260px;
+        }
+        #cookie-banner .cookie-text strong {
+            color: var(--text);
+            display: block;
+            margin-bottom: 4px;
+            font-size: 15px;
+        }
+        #cookie-banner .cookie-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        #cookie-banner .btn {
+            padding: 11px 20px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 13.5px;
+            cursor: pointer;
+            transition: filter .2s, transform .1s;
+        }
+        #cookie-banner .btn:hover { filter: brightness(1.1); }
+        #cookie-banner .btn:active { transform: translateY(1px); }
+        #cookie-banner .accept { background: var(--success); color: #fff; }
+        #cookie-banner .manage {
+            background: var(--card2);
+            color: var(--text);
+            border: 1px solid var(--border2);
+        }
+
+        /* ============ MODALS (Cookie Manager & Auth Modal) ============ */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 1200;
+            background: rgba(5, 7, 11, 0.78);
+            backdrop-filter: blur(5px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+        .modal-backdrop.open { display: flex; }
+        .modal-card {
+            width: 100%;
+            max-width: 560px;
+            max-height: 90vh;
+            overflow-y: auto;
+            background: var(--card);
+            border: 1px solid var(--border2);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            padding: 22px;
+        }
+        .modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 12px;
+            margin-bottom: 14px;
+        }
+        .modal-head h3 { margin: 0; font-size: 18px; }
+        .modal-close {
+            background: var(--card2);
+            border: 1px solid var(--border);
+            color: var(--muted2);
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+        }
+        .cookie-cat {
+            background: var(--card2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+        .cookie-cat-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            font-weight: 700;
+            font-size: 14px;
+        }
+        .cookie-cat p { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
+        .cookie-contract {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            font-size: 12.8px;
+            color: var(--muted2);
+            max-height: 180px;
+            overflow-y: auto;
+            margin: 12px 0;
+            line-height: 1.65;
+        }
+        .modal-footer-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+        .modal-footer-actions .btn {
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+        }
+        .modal-footer-actions .reject { background: var(--danger); color: #fff; }
+        .modal-footer-actions .secondary {
+            background: var(--card2);
+            color: var(--text);
+            border: 1px solid var(--border2);
+        }
+        .modal-footer-actions .accept { background: var(--success); color: #fff; }
+
+        /* Auth modal & password rules */
+        .auth-banner-wrap {
+            width: 100%;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            margin-bottom: 14px;
+            background: #090b10;
+            text-align: center;
+        }
+        .auth-banner-wrap img {
+            width: 100%;
+            max-height: 145px;
+            object-fit: cover;
+            object-position: center 42%;
+            display: block;
+        }
+        .auth-switch {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+        .auth-switch button {
+            flex: 1;
+            padding: 10px;
+            border-radius: 9px;
+            border: 1px solid var(--border);
+            background: var(--card2);
+            color: var(--muted2);
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .auth-switch button.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent-hover);
+        }
+        .pw-rules {
+            margin: 10px 0 0;
+            padding: 10px 12px;
+            border-radius: 9px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            font-size: 12px;
+            list-style: none;
+        }
+        .pw-rules li { margin-bottom: 4px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+        .pw-rules li:last-child { margin-bottom: 0; }
+        .pw-rules li.ok { color: #4ade80; font-weight: 600; }
+        .pw-rules li.bad { color: var(--muted); }
+        .auth-error-box {
+            margin-bottom: 12px;
+            padding: 10px 12px;
+            border-radius: 9px;
+            background: rgba(220, 38, 38, 0.16);
+            border: 1px solid var(--danger);
+            color: #fecaca;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.45;
+        }
+        [data-theme="light"] .auth-error-box {
+            background: #fef2f2;
+            color: #991b1b;
+        }
+
+        /* ============ LAYOUT & HEADER ============ */
+        .container { width: 100%; max-width: 980px; padding: 20px; margin: 0 auto; }
+        header.site-header {
+            padding: 14px 16px;
+            margin-bottom: 6px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, var(--card) 0%, var(--card2) 100%);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .brand { display: flex; align-items: center; gap: 12px; }
+        .brand-logo {
+            width: 46px;
+            height: 46px;
+            border-radius: 11px;
+            object-fit: contain;
+            border: 1px solid var(--accent);
+            box-shadow: 0 0 16px var(--accent-glow);
+            background: #090b10;
+            flex-shrink: 0;
+        }
+        .brand h1 { margin: 0; font-size: 20px; letter-spacing: .6px; font-weight: 800; }
+        .brand h1 span { color: var(--accent-hover); }
+        .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+        .header-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .pill-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 11px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--bg-elevated);
+            font-size: 12px;
+            color: var(--muted2);
+            font-weight: 600;
+        }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+        .status-dot.ok { background: var(--success); }
+        .status-dot.err { background: var(--danger); }
+        .icon-pill-btn {
+            background: var(--bg-elevated);
+            color: var(--muted2);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 12.5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: border-color .2s, color .2s, background .2s;
+        }
+        .icon-pill-btn:hover { border-color: var(--border2); color: var(--text); }
+        .icon-pill-btn.primary {
+            background: var(--accent);
+            border-color: var(--accent-hover);
+            color: #fff;
+        }
+
+        .tabs { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+        .tab-btn {
+            flex: 1;
+            min-width: 120px;
+            padding: 12px 10px;
+            background: var(--card);
+            color: var(--muted2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            text-align: center;
+            font-size: 13.5px;
+            transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+        }
+        .tab-btn:hover { border-color: var(--border2); color: var(--text); }
+        .tab-btn.active {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+            color: #fff;
+            border-color: var(--accent-hover);
+            box-shadow: 0 4px 16px var(--accent-glow);
+        }
+
+        .card {
+            background: var(--card);
+            padding: 22px;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            display: none;
+            margin-bottom: 20px;
+        }
+        .card.active { display: block !important; }
+        .card h3 { margin: 0 0 6px; font-size: 18px; }
+
+        /* Auth Gate Lock Screen */
+        .auth-lock-box {
+            border: 1px solid var(--border2);
+            border-radius: 14px;
+            padding: 26px 20px;
+            text-align: center;
+            background: linear-gradient(180deg, var(--card2) 0%, var(--bg-elevated) 100%);
+            margin-top: 12px;
+        }
+        .auth-lock-box img {
+            width: 68px;
+            height: 68px;
+            border-radius: 16px;
+            object-fit: contain;
+            border: 1px solid var(--accent);
+            box-shadow: 0 0 22px var(--accent-glow);
+            margin-bottom: 12px;
+        }
+        .auth-lock-box h4 { margin: 0 0 8px; font-size: 18px; }
+        .auth-lock-box p { margin: 0 auto 16px; max-width: 480px; color: var(--muted); font-size: 13.5px; }
+        .auth-lock-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        .auth-lock-actions button { min-width: 150px; margin-top: 0 !important; width: auto !important; }
+
+        label {
+            display: block;
+            margin-top: 14px;
+            margin-bottom: 6px;
+            color: var(--muted2);
+            font-size: 13.5px;
+            font-weight: 600;
+        }
+        textarea, select, input[type="text"], input[type="number"], input[type="url"], input[type="password"] {
+            width: 100%;
+            padding: 11px 12px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 9px;
+            font-family: inherit;
+            font-size: 14px;
+        }
+        input[type="range"] { width: 100%; accent-color: var(--accent); }
+        button.action-btn, a.action-btn {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 9px;
+            font-weight: 700;
+            cursor: pointer;
+            margin-top: 14px;
+            font-size: 14.5px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: filter .2s, transform .1s;
+        }
+        button.action-btn:hover:not(:disabled), a.action-btn:hover { filter: brightness(1.1); }
+        button.action-btn:disabled { background: var(--border2); cursor: not-allowed; opacity: .75; }
+        .action-btn.success { background: var(--success); }
+        .action-btn.accent2 { background: #334155; border: 1px solid var(--border2); }
+        .action-btn.secondary {
+            background: var(--card2);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+        .action-btn.small { width: auto; padding: 8px 13px; font-size: 12.5px; margin-top: 0; }
+
+        .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn-row > .action-btn { flex: 1; min-width: 130px; margin-top: 10px; }
+        .btn-row > .action-btn.small { flex: 0 1 auto; margin-top: 0; }
+        .hint { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+        .hint.warn { color: var(--warn); font-weight: 600; }
+
+        /* ============ TTS STUDIO ============ */
+        .char-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .slider-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+            padding: 12px;
+            border-radius: 10px;
+            background: var(--card2);
+            border: 1px solid var(--border);
+        }
+        .slider-grid label { margin-top: 0; display: flex; justify-content: space-between; }
+
+        /* ============ SUB PANELS ============ */
+        .sub-panel {
+            display: none;
+            margin-top: 14px;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--card2);
+        }
+        .sub-panel.open { display: block; }
+        .sub-panel label { margin-top: 0; }
+
+        /* ============ CHAT ============ */
+        .quota-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 10px 13px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 9px;
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: var(--muted2);
+        }
+        .quota-count { color: var(--warn); font-weight: 700; }
+        .chat-box {
+            min-height: 310px;
+            max-height: 480px;
+            overflow-y: auto;
+            padding: 14px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 12px;
+            scrollbar-width: thin;
+        }
+        .msg {
+            padding: 11px 15px;
+            border-radius: 13px;
+            margin-bottom: 10px;
+            max-width: 88%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+        .msg.user { background: var(--accent); color: #fff; margin-left: auto; white-space: pre-wrap; }
+        .msg.bot { background: var(--bot-bg); color: var(--bot-text); border: 1px solid var(--border); }
+        .msg.error { background: #7f1d1d; color: #fee2e2; }
+        .msg .md-body p { margin: 0 0 8px; }
+        .msg .md-body p:last-child { margin-bottom: 0; }
+        .msg .md-body ul { margin: 4px 0 8px; padding-left: 20px; }
+        .msg .md-body code.inline-code {
+            background: rgba(148, 163, 184, .2);
+            padding: 2px 6px;
+            border-radius: 5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12.5px;
+        }
+        .code-wrap {
+            margin: 8px 0;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border2);
+            background: var(--code-bg);
+            color: #e2e8f0;
+        }
+        .code-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 10px;
+            background: rgba(255, 255, 255, .06);
+            font-size: 11px;
+            color: #94a3b8;
+        }
+        .code-copy-btn {
+            background: transparent;
+            border: 1px solid #475569;
+            color: #e2e8f0;
+            border-radius: 5px;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .code-wrap pre {
+            margin: 0;
+            padding: 10px;
+            overflow-x: auto;
+            font-size: 12.5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .msg-actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+        .msg-act-btn {
+            background: rgba(148, 163, 184, .14);
+            border: 1px solid var(--border);
+            color: inherit;
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-size: 11.5px;
+            cursor: pointer;
+        }
+        .msg-act-btn:hover { border-color: var(--border2); }
+        .msg .msg-files { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .msg .msg-files .chip {
+            font-size: 11px;
+            background: rgba(255, 255, 255, .15);
+            padding: 4px 9px;
+            border-radius: 20px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .loading {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+            background: currentColor; margin: 0 2px;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+        .loading:nth-child(1) { animation-delay: -0.32s; }
+        .loading:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+        /* ---- Attachment tray ---- */
+        .attach-tray {
+            display: none; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; padding: 10px;
+            background: var(--bg-elevated); border: 1px dashed var(--border2); border-radius: 9px;
+        }
+        .attach-tray.active { display: flex; }
+        .attach-item {
+            position: relative; background: var(--card2); border: 1px solid var(--border);
+            border-radius: 8px; padding: 6px 26px 6px 8px; font-size: 12px; color: var(--muted2);
+            max-width: 195px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .attach-item .rm {
+            position: absolute; top: 3px; right: 4px; cursor: pointer; color: #ef4444;
+            font-weight: 800; font-size: 15px; line-height: 1; background: none; border: none; padding: 2px 4px;
+        }
+        .attach-item img { max-width: 100%; max-height: 85px; border-radius: 6px; display: block; margin-bottom: 4px; }
+        .attach-item .thumb { font-size: 20px; }
+
+        .input-row { display: flex; gap: 8px; align-items: flex-end; }
+        .input-row textarea { flex: 1; margin: 0; resize: vertical; min-height: 52px; }
+        .tool-btn {
+            width: 52px; height: 52px; flex: 0 0 52px; border-radius: 9px;
+            border: 1px solid var(--border); background: var(--card2); color: var(--muted2);
+            font-size: 21px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+            transition: background .2s, color .2s;
+        }
+        .tool-btn:hover { background: var(--border); color: var(--text); }
+        .tool-btn.recording { background: var(--danger); color: #fff; animation: pulse 1.2s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+
+        /* ---- Media result card ---- */
+        .media-card {
+            margin-top: 10px; background: rgba(15, 23, 42, .45); border: 1px solid var(--border2);
+            border-radius: 10px; padding: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        }
+        [data-theme="light"] .media-card { background: #f8fafc; }
+        .media-card .mc-icon { font-size: 28px; }
+        .media-card .mc-info { flex: 1; min-width: 150px; }
+        .media-card .mc-name { font-size: 13px; font-weight: 700; word-break: break-all; }
+        .media-card .mc-size { font-size: 12px; color: var(--muted); }
+        .download-btn {
+            background: var(--success); color: #fff; border: none; border-radius: 8px;
+            padding: 10px 18px; font-weight: 700; font-size: 13.5px; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+            transition: filter .2s;
+        }
+        .download-btn:hover { filter: brightness(1.1); }
+        .media-preview { max-width: 100%; border-radius: 8px; margin-top: 8px; display: block; }
+
+        /* ============ MEDIA STUDIO ============ */
+        .dropzone {
+            border: 2px dashed var(--border2); border-radius: 10px; padding: 20px; text-align: center;
+            background: var(--bg-elevated); cursor: pointer; margin-top: 10px; transition: border-color .2s, background .2s;
+        }
+        .dropzone:hover, .dropzone.dragover { border-color: var(--accent); background: var(--accent-glow); }
+        .param-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px; margin-top: 10px;
+        }
+        .param-grid label { margin-top: 4px; }
+
+        /* ============ LEGAL PAGES ============ */
+        .legal-shell { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+        .legal-nav { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+        .legal-nav button {
+            background: var(--card); border: 1px solid var(--border); color: var(--muted2);
+            padding: 9px 15px; border-radius: 8px; font-weight: 700; font-size: 13.5px; cursor: pointer;
+            transition: background .2s, color .2s;
+        }
+        .legal-nav button:hover { color: var(--text); border-color: var(--border2); }
+        .legal-nav button.active { background: var(--accent); color: #fff; border-color: var(--accent-hover); }
+        .legal-page { display: none; }
+        .legal-page.active { display: block; }
+        .legal-content { line-height: 1.8; color: var(--muted2); font-size: 14.5px; }
+        .legal-content h2 { color: var(--link); font-size: 20px; margin: 0 0 4px; }
+        .legal-content .updated { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+        .legal-content h3 { color: var(--text); font-size: 15px; margin: 20px 0 6px; }
+        .legal-content p { margin: 0 0 12px; }
+        .legal-content ul { margin: 0 0 12px; padding-left: 22px; }
+        .legal-content li { margin-bottom: 8px; }
+        .legal-content strong { color: var(--text); }
+
+        footer.site-footer { margin: 26px 0 92px; text-align: center; font-size: 13px; color: var(--muted); }
+        footer.site-footer .flinks { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; }
+        footer.site-footer button {
+            background: none; border: none; color: var(--link); text-decoration: underline;
+            cursor: pointer; font-size: 13px; padding: 4px; font-family: inherit;
+        }
+        footer.site-footer button:hover { color: var(--text); }
+
+        @media (max-width: 640px) {
+            .container { padding: 12px; }
+            .card { padding: 15px; }
+            .msg { max-width: 96%; font-size: 13.5px; }
+            #cookie-banner { padding: 12px 14px; }
+            #cookie-banner .btn { flex: 1; min-width: 110px; padding: 11px 12px; }
+            #cookie-banner .cookie-actions { width: 100%; }
+            .legal-content { font-size: 14px; }
+            .tool-btn { width: 46px; height: 46px; flex: 0 0 46px; font-size: 19px; }
+            #toast-container { left: 12px; right: 12px; max-width: none; }
+        }
+        @media (max-width: 380px) {
+            .input-row { flex-direction: column; align-items: stretch; }
+            .tool-btn { width: 100%; flex: none; height: 44px; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+<!-- ============ COOKIE CONSENT BANNER (Ilk ekranda yalniz Kabul Et ve Yonet) ============ -->
+<div id="cookie-banner" role="region" aria-label="Çerez onayı" aria-live="polite">
+    <div class="cookie-text">
+        <strong>🍪 Çerez Tercihleri</strong>
+        Sitemiz deneyiminizi geliştirmek ve güvenliği korumak için çerezlerden ve tarayıcı depolamasından yararlanır.
+        Oturumunuz ve kullanım haklarınız sunucudaki hesabınıza bağlıdır; çerezleri reddetmeniz giriş durumunuzu etkilemez.
+    </div>
+    <div class="cookie-actions">
+        <button class="btn manage" id="cookie-manage-btn" type="button" onclick="openCookieManager()">Çerezleri Yönet</button>
+        <button class="btn accept" id="cookie-accept-btn" type="button" onclick="acceptCookies()">Çerezleri Kabul Et</button>
+    </div>
+</div>
+
+<!-- ============ DETAYLI CEREZ POLITIKASI VE YONETIM MODALI ============ -->
+<div id="cookie-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cookie-modal-title">
+    <div class="modal-card">
+        <div class="modal-head">
+            <h3 id="cookie-modal-title">🍪 Çerez Politikası ve Tercih Yönetimi</h3>
+            <button type="button" class="modal-close" aria-label="Kapat" onclick="closeCookieManager()">×</button>
+        </div>
+
+        <div class="cookie-cat">
+            <div class="cookie-cat-head">
+                <span>🔒 Zorunlu Güvenlik &amp; Erişim Depolaması</span>
+                <input type="checkbox" checked disabled aria-label="Zorunlu güvenlik depolaması">
+            </div>
+            <p>Hız sınırlama güvenliği ve temel site çalışması için gereklidir. Hesap oturumunuz ve haklarınız ise çerezlere bağımlı olmadan sunucu veritabanında korunur.</p>
+        </div>
+
+        <div class="cookie-cat">
+            <div class="cookie-cat-head">
+                <label for="pref-functional" style="margin:0;cursor:pointer;">🎨 İşlevsel Tercihler</label>
+                <input type="checkbox" id="pref-functional" checked>
+            </div>
+            <p>Koyu/Açık tema seçimi, ses efekti durumu ve seçtiğiniz seslendirme tercihlerini hatırlar.</p>
+        </div>
+
+        <div class="cookie-cat">
+            <div class="cookie-cat-head">
+                <label for="pref-analytics" style="margin:0;cursor:pointer;">📊 Performans ve Analitik</label>
+                <input type="checkbox" id="pref-analytics">
+            </div>
+            <p>Sayfa performansını ve özellik kullanım istatistiklerini anonim olarak iyileştirmemize yardımcı olur.</p>
+        </div>
+
+        <div class="cookie-contract">
+            <strong>Detaylı Çerez Sözleşmesi ve Gizlilik Bilgilendirmesi</strong><br><br>
+            1. <strong>Çerezsiz Oturum Garantisi:</strong> ASLAN Technologies kullanıcı oturumları, çerezlere bağımlı olmayan güvenli Authorization Bearer jetonlarıyla yönetilir. Çerezleri reddetseniz dahi hesabınıza giriş yapabilir, yapay zeka ve seslendirme haklarınızı veritabanı üzerinden kesintisiz kullanabilirsiniz.<br><br>
+            2. <strong>Veri Güvenliği:</strong> Kullanıcı şifreleri PBKDF2-HMAC-SHA256 ile tek yönlü olarak hashlenir, kullanım hakları sunucu veritabanında tutulur.<br><br>
+            3. <strong>Kararınızı Değiştirme:</strong> Seçimlerinizi sayfa altındaki <em>Çerez Tercihini Sıfırla</em> bağlantısından dilediğiniz zaman güncelleyebilirsiniz.<br><br>
+            4. <strong>Tümünü Reddetme Hakkı:</strong> Aşağıdaki <strong>Çerezleri Reddet</strong> düğmesini kullanarak zorunlu olmayan tüm çerezleri kalıcı olarak devre dışı bırakabilirsiniz.
+        </div>
+
+        <div class="modal-footer-actions">
+            <button class="btn reject" id="cookie-reject-btn" type="button" onclick="rejectCookies()">Çerezleri Reddet</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn secondary" type="button" onclick="saveCookiePreferences()">Seçimleri Kaydet</button>
+                <button class="btn accept" type="button" onclick="acceptCookies()">Çerezleri Kabul Et</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ GIRIS / KAYIT MODALI ============ -->
+<div id="auth-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+    <div class="modal-card">
+        <div class="modal-head">
+            <h3 id="auth-modal-title">🛡️ ASLAN Hesap Erişimi</h3>
+            <button type="button" class="modal-close" aria-label="Kapat" onclick="closeAuthModal()">×</button>
+        </div>
+
+        <div class="auth-banner-wrap">
+            <img src="/assets/logo-banner.png" alt="ASLAN Technologies">
+        </div>
+
+        <div class="auth-switch">
+            <button type="button" id="auth-tab-login" class="active" onclick="switchAuthMode('login')">🔑 Giriş Yap</button>
+            <button type="button" id="auth-tab-register" onclick="switchAuthMode('register')">📝 Kayıt Ol</button>
+        </div>
+
+        <div id="auth-error-box" class="auth-error-box" role="alert" style="display:none;"></div>
+
+        <!-- GIRIS FORMU -->
+        <form id="form-login" novalidate onsubmit="submitLogin(event)">
+            <label for="login-username">Kullanıcı Adı</label>
+            <input type="text" id="login-username" autocomplete="username" minlength="3" required placeholder="ornek_kullanici" oninput="clearAuthError()">
+
+            <label for="login-password">Şifre</label>
+            <input type="password" id="login-password" autocomplete="current-password" required placeholder="••••••••••••" oninput="clearAuthError()">
+
+            <button type="submit" id="btn-login-submit" class="action-btn">Giriş Yap</button>
+            <p class="hint">Oturumunuz çerezlerden bağımsız çalışır; haklarınız hesabınızda kalıcı olarak saklanır.</p>
+        </form>
+
+        <!-- KAYIT FORMU -->
+        <form id="form-register" style="display:none;" novalidate onsubmit="submitRegister(event)">
+            <label for="reg-username">Kullanıcı Adı (en az 3 karakter, boşluksuz)</label>
+            <input type="text" id="reg-username" autocomplete="username" minlength="3" maxlength="32" required placeholder="en az 3 karakter (ör: aslan_1)" oninput="clearAuthError(); updatePasswordChecklist()">
+
+            <label for="reg-password">Şifre (min. 12 karakter, güçlü şifre)</label>
+            <input type="password" id="reg-password" autocomplete="new-password" minlength="12" required placeholder="En az 12 karakter..." oninput="clearAuthError(); updatePasswordChecklist()">
+
+            <label for="reg-password-confirm">Şifre Tekrar</label>
+            <input type="password" id="reg-password-confirm" autocomplete="new-password" minlength="12" required placeholder="Şifreyi tekrar yazın..." oninput="clearAuthError(); updatePasswordChecklist()">
+
+            <ul class="pw-rules" id="pw-checklist">
+                <li id="chk-uname" class="bad">○ Kullanıcı adı en az 3 karakter (boşluksuz)</li>
+                <li id="chk-len" class="bad">○ Şifre en az 12 karakter</li>
+                <li id="chk-upper" class="bad">○ En az 1 büyük harf (A-Z)</li>
+                <li id="chk-lower" class="bad">○ En az 1 küçük harf (a-z)</li>
+                <li id="chk-digit" class="bad">○ En az 1 rakam (0-9)</li>
+                <li id="chk-sym" class="bad">○ En az 1 nokta veya özel sembol (. ! @ # $ vb.)</li>
+                <li id="chk-match" class="bad">○ Şifreler birebir eşleşiyor</li>
+            </ul>
+
+            <button type="submit" id="btn-register-submit" class="action-btn">Hesap Oluştur ve Giriş Yap</button>
+        </form>
+    </div>
+</div>
+
+<div class="container">
+    <header class="site-header">
+        <div class="brand">
+            <img src="/assets/logo-mark.png" alt="ASLAN Technologies Logo" class="brand-logo" width="46" height="46">
+            <div>
+                <h1>ASLAN <span>Technologies</span></h1>
+                <p>Ses Stüdyosu · Aslan AI Multimodal Asistan · Medya Stüdyosu</p>
+            </div>
+        </div>
+        <div class="header-controls">
+            <span class="pill-badge" id="health-badge" title="Sunucu ve API durumu">
+                <span class="status-dot" id="health-dot"></span>
+                <span id="health-text">Kontrol ediliyor</span>
+            </span>
+            <div id="nav-auth-area" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="icon-pill-btn primary" onclick="openAuthModal('login', 'ai')">🔑 Giriş Yap</button>
+                <button type="button" class="icon-pill-btn" onclick="openAuthModal('register', 'ai')">📝 Kayıt Ol</button>
+            </div>
+            <button type="button" class="icon-pill-btn" id="btn-sfx-toggle" onclick="toggleSfx()" aria-pressed="true">🔊 Efekt</button>
+            <button type="button" class="icon-pill-btn" id="btn-theme-toggle" onclick="toggleTheme()">☀️ Açık Tema</button>
+        </div>
+    </header>
+
+    <div class="tabs" role="tablist" aria-label="Ana Modüller">
+        <button class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="panel-tts" data-tab="tts" onclick="switchTab('tts', this)">🎙️ Ses</button>
+        <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-ai" data-tab="ai" onclick="switchTab('ai', this)">🤖 Aslan AI</button>
+        <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-media" data-tab="media" onclick="switchTab('media', this)">🎬 Medya Stüdyosu</button>
+        <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-legal" data-tab="legal" onclick="switchTab('legal', this)">⚖️ Yasal</button>
+    </div>
+
+    <!-- ============ SES STÜDYOSU ============ -->
+    <div id="panel-tts" class="card active" role="tabpanel">
+        <h3>🎙️ Ses Stüdyosu (Neural TTS)</h3>
+        <p class="hint" style="margin-top:0;">Metni doğal Türkçe veya İngilizce sese dönüştürün, hız/ton ayarlayın, Aslan AI ile sesle yönetin ve MP3 olarak indirin.</p>
+
+        <div id="tts-auth-lock" class="auth-lock-box">
+            <img src="/assets/logo-mark.png" alt="ASLAN Kilit">
+            <h4>🔒 Ses Stüdyosu Üyelere Özeldir</h4>
+            <p>Metinden Sese (TTS) özelliğini kullanabilmek için lütfen giriş yapın veya ücretsiz hesabınızı oluşturun.</p>
+            <div class="auth-lock-actions">
+                <button type="button" class="action-btn" onclick="openAuthModal('login', 'tts')">🔑 Giriş Yap</button>
+                <button type="button" class="action-btn secondary" onclick="openAuthModal('register', 'tts')">📝 Kayıt Ol</button>
+            </div>
+        </div>
+
+        <div id="tts-workspace" style="display:none;">
+            <label for="tts-text">Metin:</label>
+            <textarea id="tts-text" rows="4" maxlength="5000" placeholder="Seslendirilecek metni yazın..." oninput="updateTtsCounter()"></textarea>
+            <div class="char-row">
+                <span id="tts-char-count">0 / 5000 karakter</span>
+                <button type="button" class="action-btn small secondary" onclick="clearTTS()">Temizle</button>
+            </div>
+
+            <label for="tts-voice">Ses Karakteri:</label>
+            <select id="tts-voice">
+                <option value="tr-TR-AhmetNeural">Ahmet (Erkek · Türkçe)</option>
+                <option value="tr-TR-EmelNeural">Emel (Kadın · Türkçe)</option>
+                <option value="en-US-AndrewNeural">Andrew (Male · English)</option>
+                <option value="en-US-AvaNeural">Ava (Female · English)</option>
+            </select>
+
+            <div class="slider-grid">
+                <div>
+                    <label for="tts-rate">Konuşma Hızı <span id="tts-rate-val">+0%</span></label>
+                    <input type="range" id="tts-rate" min="-40" max="60" step="5" value="0" oninput="updateTtsSliders()">
+                </div>
+                <div>
+                    <label for="tts-pitch">Ses Tonu <span id="tts-pitch-val">+0Hz</span></label>
+                    <input type="range" id="tts-pitch" min="-20" max="20" step="2" value="0" oninput="updateTtsSliders()">
+                </div>
+                <div style="display:flex;align-items:flex-end;">
+                    <button type="button" class="action-btn small secondary" style="width:100%;" onclick="resetTtsSliders()">↺ Varsayılana Sıfırla</button>
+                </div>
+            </div>
+
+            <button id="btn-speak" class="action-btn" type="button" onclick="generateAudio()">Sesi Oluştur ve Çal</button>
+
+            <div id="audio-box" style="display:none; margin-top:15px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <span class="hint" style="margin:0;">Oluşturulan Ses</span>
+                    <span class="pill-badge" id="tts-engine-badge">Motor: edge-tts</span>
+                </div>
+                <audio id="player" controls style="width:100%;"></audio>
+                <div class="btn-row">
+                    <a id="dl-link" class="action-btn success" download="aslan_ses.mp3" href="#">⬇️ İndir (.mp3)</a>
+                    <button class="action-btn accent2 small" type="button" style="margin-top:10px;" onclick="copyLink()">🔗 Bağlantı Kopyala</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ ASLAN AI ============ -->
+    <div id="panel-ai" class="card" role="tabpanel">
+        <h3>🤖 Aslan AI Asistan</h3>
+        <p class="hint" style="margin-top:0;">Çoklu yapay zeka yedekleme zinciri, görsel/video/ses/PDF analizi ve doğal komutlarla TTS &amp; Medya kontrolü.</p>
+
+        <div id="ai-auth-lock" class="auth-lock-box">
+            <img src="/assets/logo-mark.png" alt="ASLAN AI Kilit">
+            <h4>🔒 Aslan AI Asistanına Erişim İçin Giriş Yapın</h4>
+            <p>Yapay zeka sohbeti ve görsel üretimi yalnızca kayıtlı kullanıcılara açıktır. Kullanım haklarınız doğrudan hesabınızda kalıcı olarak saklanır.</p>
+            <div class="auth-lock-actions">
+                <button type="button" class="action-btn" onclick="openAuthModal('login', 'ai')">🔑 Giriş Yap</button>
+                <button type="button" class="action-btn secondary" onclick="openAuthModal('register', 'ai')">📝 Kayıt Ol</button>
+            </div>
+        </div>
+
+        <div id="ai-workspace" style="display:none;">
+            <div class="quota-bar">
+                <span>Hesap AI Hakkı: <strong class="quota-count" id="quota-display">--/5</strong></span>
+                <span class="hint" id="image-quota-display" style="margin:0;">Görsel hakları yükleniyor...</span>
+            </div>
+
+            <div class="chat-box" id="chat-box" aria-live="polite">
+                <div class="msg bot"><div class="md-body"><p>Merhaba! Ben Aslan AI 🤖 Görsel, video, ses veya PDF yükleyebilir; medya işleme komutları verebilir ya da "Bunu Emel sesiyle hızlı oku" / "Okumayı durdur" gibi komutlarla Ses Stüdyosunu yönetebilirsiniz.</p></div></div>
+            </div>
+
+            <div class="attach-tray" id="attach-tray"></div>
+
+            <div class="input-row">
+                <textarea id="ai-input" rows="2" maxlength="8000" placeholder="Bir şey sor... (örn: 'Merhaba metnini Emel sesiyle +20% hızda oku')" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendAI();}"></textarea>
+                <button class="tool-btn" type="button" id="btn-mic" title="Sesli mesaj (kayıt)" onclick="toggleRecord()">🎤</button>
+                <button class="tool-btn" type="button" id="btn-attach" title="Dosya ekle (görsel/video/ses/PDF)" onclick="document.getElementById('ai-file').click()">📎</button>
+            </div>
+            <input type="file" id="ai-file" multiple hidden
+                   accept="image/*,video/*,audio/*,application/pdf,.txt,.md,.csv,.json"
+                   onchange="handleFileSelect(this)">
+
+            <div class="btn-row">
+                <button id="btn-ai" class="action-btn" type="button" onclick="sendAI()">Gönder</button>
+                <button class="action-btn accent2" type="button" onclick="openImageStudio()">🎨 Görsel Üret</button>
+                <button class="action-btn secondary small" type="button" style="margin-top:10px;" onclick="toggleSubPanel('ai-commands')">⚡ Hızlı Komutlar</button>
+                <button class="action-btn secondary small" type="button" style="margin-top:10px;" onclick="openSocialStudio()">⬇️ Video İndir</button>
+                <button class="action-btn secondary small" type="button" style="margin-top:10px;" onclick="clearChat()">🗑️ Temizle</button>
+            </div>
+
+            <p class="hint">💡 İpucu: AI üzerinden "Bunu Emel ile hızlı oku" veya "Okumayı durdur" komutlarıyla Ses Stüdyosunu doğrudan kontrol edebilirsiniz.</p>
+
+            <!-- Medya & TTS Hizli Komutlari -->
+            <div class="sub-panel" id="ai-commands">
+                <label>Aslan AI Hızlı Komutlar:</label>
+                <div class="btn-row" id="ai-command-row">
+                    <button class="action-btn small" type="button" onclick="runAICommand('Videodan sesi çıkar')">🎧 Ses Çıkar</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Videoyu 5 saniye kırp')">🎬 Videoyu Kırp</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Görseli 800x600 olarak kırp')">🖼️ Görseli Kırp</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Videonun köşesine görsel ekle')">🖥️ Görsel Ekle</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Sesi arka plan gürültüsünden temizle')">🔇 Sesi Temizle</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Fotoğraflardan müzikli video oluştur')">🎵 Müzikli Slayt</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('İki videoyu birleştir')">🔗 Videoları Birleştir</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Aslan Technologies hoş geldiniz metnini Emel sesiyle oku')">🔊 Sesli Oku</button>
+                    <button class="action-btn small" type="button" onclick="runAICommand('Sesli okumayı durdur')">⏹️ Okumayı Durdur</button>
+                </div>
+            </div>
+
+            <!-- Görsel Üretim Stüdyosu -->
+            <div class="sub-panel" id="image-studio">
+                <label for="image-prompt">Görsel açıklaması (en fazla 1000 karakter):</label>
+                <textarea id="image-prompt" rows="2" maxlength="1000" placeholder="Örn: 'kırmızı sibernetik aslan logosu, metalik zemin, 4K'"></textarea>
+                <div class="btn-row">
+                    <button class="action-btn accent2" type="button" id="btn-generate-image" onclick="generateImage()">🎨 Görsel Üret</button>
+                </div>
+                <p class="hint">Günlük 3, haftalık ve aylık toplam 5 görsel hakkınız hesabınızda tutulur.</p>
+            </div>
+
+            <!-- Sosyal Medya İndirici -->
+            <div class="sub-panel" id="social-studio">
+                <label for="social-url">Video bağlantısı (TikTok, YouTube, Facebook, Instagram, X, Twitch):</label>
+                <input type="url" id="social-url" placeholder="https://www.youtube.com/watch?v=...">
+                <div class="btn-row">
+                    <button class="action-btn" type="button" id="btn-social" onclick="downloadSocial()">⬇️ Videoyu İndir</button>
+                </div>
+                <p class="hint">Bu araç doğrudan video indirme motorunu kullanır; AI sohbet mesaj hakkınızdan düşmez.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ MEDYA STÜDYOSU ============ -->
+    <div id="panel-media" class="card" role="tabpanel">
+        <h3>🎬 Medya Stüdyosu (FFmpeg Tam Kapasite Motoru)</h3>
+        <p class="hint" style="margin-top:0;">Video, ses ve görsellerinizi dönüştürün, sıkıştırın, kırpın, hızlandırın veya birleştirin.</p>
+
+        <div class="dropzone" id="media-dropzone" tabindex="0" role="button" onclick="document.getElementById('media-file').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('media-file').click();}">
+            <strong>📁 Dosya Seçin veya Buraya Sürükleyin</strong>
+            <div class="hint">Görsel, Video, Ses desteklenir. Çoklu dosya seçilebilir (sıra önemlidir).</div>
+        </div>
+        <input type="file" id="media-file" multiple hidden accept="image/*,video/*,audio/*" onchange="handleMediaSelect(this)">
+        <div class="attach-tray" id="media-tray" style="margin-top:10px;"></div>
+
+        <label for="media-op">İşlem Türü (19 FFmpeg Modülü):</label>
+        <select id="media-op" onchange="renderMediaParams()">
+            <option value="extract_audio">🎧 Videodan Ses Ayıkla (MP3/WAV/AAC/FLAC)</option>
+            <option value="compress_audio">📦 Ses Sıkıştır (64k/96k/128k/192k)</option>
+            <option value="optimize_video">🗜️ Video Sıkıştır (WhatsApp/Sosyal)</option>
+            <option value="convert">🔄 Format Değiştir (MP4/WebM/GIF/MP3/WAV/PNG)</option>
+            <option value="trim_video">✂️ Video Kırp (Zaman Aralığı)</option>
+            <option value="change_speed">⏩ Oynatma Hızı Değiştir (0.5x – 2.0x)</option>
+            <option value="mute_video">🔇 Videoyu Sessize Al</option>
+            <option value="resize">📐 Yeniden Boyutlandır (Video / Görsel)</option>
+            <option value="extract_thumbnail">📸 Videodan Kapak Kare Al</option>
+            <option value="merge_video_image">🖥️ Videoya Görsel / Logo Ekle (Video, Görsel)</option>
+            <option value="combine_audio_video">🎬 Ses + Video Birleştir (Video, Ses)</option>
+            <option value="overlay_audio">🔊 Videoya Ses Ekle (Video, Ses)</option>
+            <option value="video_concat">🔗 Videoları Birleştir (Video 1, Video 2...)</option>
+            <option value="stitch_media">🎞️ Fotoğraf / Video Slaytı</option>
+            <option value="slideshow_with_music">🎵 Müzikli Fotoğraf Slaytı (En fazla 10 foto + 1 ses)</option>
+            <option value="merge_audio">🔀 Ses Dosyalarını Birleştir (Ses 1, Ses 2...)</option>
+            <option value="denoise_audio">🎙️ Ses Arka Plan Gürültüsü Temizle</option>
+            <option value="crop_image">🖼️ Görsel / Video Kırp (X, Y, Genişlik, Yükseklik)</option>
+            <option value="remove_background">🪄 Görsel Arka Plan Kaldır (Renk Anahtarı)</option>
+        </select>
+
+        <div id="media-params" class="param-grid"></div>
+
+        <button id="btn-media-process" class="action-btn" type="button" onclick="processMedia()">⚙️ İşlemi Başlat</button>
+        <div id="media-result-box" style="margin-top:14px;"></div>
+
+        <div class="sub-panel open" style="margin-top:18px;">
+            <label for="media-social-url">🌐 Sosyal Medya Video İndirici (Doğrudan İndirme):</label>
+            <input type="url" id="media-social-url" placeholder="https://www.youtube.com/watch?v=... veya TikTok/Instagram bağlantısı">
+            <div class="btn-row">
+                <button class="action-btn accent2" type="button" id="btn-media-social" onclick="downloadSocialFromStudio()">⬇️ Bağlantıdan İndir</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ YASAL SAYFALAR ============ -->
+    <div id="panel-legal" class="card" role="tabpanel">
+        <div class="legal-shell">
+            <div class="legal-nav" role="tablist">
+                <button type="button" class="active" data-page="terms" onclick="showLegalPage('terms', this)">Kullanım Koşulları</button>
+                <button type="button" data-page="privacy" onclick="showLegalPage('privacy', this)">Gizlilik Politikası</button>
+                <button type="button" data-page="service" onclick="showLegalPage('service', this)">Hizmet Sözleşmesi</button>
+                <button type="button" data-page="copyright" onclick="showLegalPage('copyright', this)">Telif Hakları</button>
+                <button type="button" data-page="cookies" onclick="showLegalPage('cookies', this)">Çerez Politikası</button>
+            </div>
+
+            <!-- KULLANIM KOŞULLARI -->
+            <section id="legal-page-terms" class="legal-page active">
+                <div class="legal-content">
+                    <h2>Kullanım Koşulları</h2>
+                    <p class="updated">Terms of Service · ASLAN Technologies</p>
+                    <p>ASLAN Technologies web sitesine ("Site") erişerek aşağıdaki koşulları kabul etmiş sayılırsınız. Koşulları kabul etmiyorsanız Siteyi kullanmamalısınız.</p>
+
+                    <h3>1. Genel Hükümler</h3>
+                    <p>Site, ASLAN Technologies tarafından işletilmekte olup; Ses Stüdyosu, Aslan AI Asistanı ve Medya Stüdyosu modüllerinden oluşur. Site üzerindeki tüm araçlar "olduğu gibi" ve "mevcut olduğu ölçüde" sunulmaktadır.</p>
+
+                    <h3>2. Hesap ve Kullanım Koşulları</h3>
+                    <ul>
+                        <li>Aslan AI ve Ses Stüdyosu kullanımı kayıtlı hesap gerektirir. Yapay zeka hakları doğrudan kullanıcı hesabına bağlı veritabanında saklanır.</li>
+                        <li>Yüklenen dosyalar geçici olarak işlenir ve işlem sonrası otomatik olarak silinir.</li>
+                        <li>Kötüye kullanım, yetkisiz erişim denemesi veya hizmeti engelleme girişimleri yasaktır.</li>
+                    </ul>
+
+                    <h3>3. İçerikler ve Fikri Mülkiyet</h3>
+                    <p>Site üzerindeki yazılar, tasarımlar, logo, yazılımlar ve marka unsurları ASLAN Technologies'a aittir. İzin alınmadan çoğaltılamaz veya ticari amaçla kullanılamaz.</p>
+
+                    <h3>4. Sorumluluk Kısıtlaması</h3>
+                    <p>ASLAN Technologies; sunucu kesintileri, üçüncü taraf API hataları veya yüklenen içeriklerden doğan dolaylı zararlardan sorumlu değildir.</p>
+
+                    <h3>5. Hukuki Şartlar</h3>
+                    <p>Bu koşullar Türk hukukuna tabidir. Uyuşmazlıklarda İstanbul Mahkemeleri yetkilidir. İletişim: <strong>aslan@teknoloji.com</strong>.</p>
+                </div>
+            </section>
+
+            <!-- GİZLİLİK POLİTİKASI -->
+            <section id="legal-page-privacy" class="legal-page">
+                <div class="legal-content">
+                    <h2>Gizlilik Politikası</h2>
+                    <p class="updated">Privacy Policy · ASLAN Technologies</p>
+                    <p>ASLAN Technologies olarak gizliliğinize önem veriyoruz. Bu politika, Site üzerinden hangi verileri, hangi amaçla işlediğimizi açıklar.</p>
+
+                    <h3>1. Toplanan ve Şifrelenen Veriler</h3>
+                    <ul>
+                        <li><strong>Hesap verileri:</strong> Kullanıcı adı ve PBKDF2-HMAC-SHA256 ile tek yönlü hashlenmiş şifre bilgisi. Uzak sunucu kayıtları ayrıca şifreli ve HMAC doğrulamalı olarak saklanır.</li>
+                        <li><strong>Kullanım hakları:</strong> Günlük AI ve görsel kota sayaçları hesabınıza bağlı olarak veritabanında tutulur.</li>
+                        <li><strong>Çerez tercihi:</strong> Çerez onay kararınız (Kabul / Özelleştirilmiş / Reddet) kaydedilir.</li>
+                        <li><strong>Yüklenen içerik:</strong> Yalnızca sizin talebinizle işlenir ve işlem sonrası hemen silinir.</li>
+                    </ul>
+
+                    <h3>2. Veri Güvenliği ve KVKK</h3>
+                    <p>Verileriniz TLS şifreleme ile iletilir. KVKK kapsamındaki bilgi, düzeltme veya silme taleplerinizi <strong>aslan@teknoloji.com</strong> adresine iletebilirsiniz.</p>
+                </div>
+            </section>
+
+            <!-- HİZMET SÖZLEŞMESİ -->
+            <section id="legal-page-service" class="legal-page">
+                <div class="legal-content">
+                    <h2>Hizmet Sözleşmesi</h2>
+                    <p class="updated">Service Agreement · ASLAN Technologies</p>
+                    <p>İşbu Hizmet Sözleşmesi ("Sözleşme"), ASLAN Technologies tarafından sunulan Ses Stüdyosu, Aslan AI Asistanı, Görsel Üretim ve Medya Stüdyosu hizmetlerinin kullanım koşullarını düzenler.</p>
+
+                    <h3>1. Hizmetler ve Kota Sınırları</h3>
+                    <ul>
+                        <li>Aslan AI Asistanı günde <strong>5 (beş) mesaj</strong> hakkı ile sınırlıdır.</li>
+                        <li>Görsel üretimi günde <strong>3 (üç)</strong>, haftalık ve aylık toplam <strong>5 (beş)</strong> görsel hakkı ile sınırlıdır.</li>
+                        <li>Haklar <strong>veritabanındaki kullanıcı hesabınıza bağlıdır</strong>; tarayıcı değişikliği veya sayfa yenilemesi haklarınızı sıfırlamaz.</li>
+                    </ul>
+
+                    <h3>2. Kullanıcının Yükümlülükleri</h3>
+                    <p>Kullanıcı yüklediği medya dosyalarının ve ürettiği çıktıların hukuka uygunluğundan bizzat sorumludur.</p>
+                </div>
+            </section>
+
+            <!-- TELİF HAKLARI -->
+            <section id="legal-page-copyright" class="legal-page">
+                <div class="legal-content">
+                    <h2>Telif Hakları Politikası</h2>
+                    <p class="updated">Copyright Policy · ASLAN Technologies</p>
+                    <p>Site yazılımı, arayüz tasarımı ve ASLAN Technologies logosu uluslararası telif hakkı mevzuatı ile korunmaktadır. Kullanıcıların yüklediği dosyalar kendi mülkiyetlerinde kalır. Telif bildirimleri: <strong>aslan@teknoloji.com</strong>.</p>
+                </div>
+            </section>
+
+            <!-- ÇEREZ POLİTİKASI -->
+            <section id="legal-page-cookies" class="legal-page">
+                <div class="legal-content">
+                    <h2>Çerez Politikası</h2>
+                    <p class="updated">Cookie Policy · ASLAN Technologies</p>
+                    <p>Bu politika, Site üzerinde kullanılan çerez ve tarayıcı depolama mekanizmalarını açıklar.</p>
+
+                    <h3>1. Çerezsiz Oturum ve Hak Koruması</h3>
+                    <p>Oturum doğrulaması ve hesap kotaları çerezlere bağımlı olmayan güvenli <code>Authorization: Bearer</code> jetonları ve sunucu veritabanı üzerinden yürütülür. Böylece çerezleri reddetseniz bile giriş durumunuz ve haklarınız korunur.</p>
+
+                    <h3>2. Tercih Yönetimi</h3>
+                    <p>Sayfa altındaki çerez bildiriminde bulunan <strong>Çerezleri Yönet</strong> düğmesinden veya alt menüdeki <em>Çerez Tercihini Sıfırla</em> bağlantısından tercihlerinizi değiştirebilir ya da sözleşme altındaki <strong>Çerezleri Reddet</strong> seçeneğini kullanabilirsiniz.</p>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <footer class="site-footer">
+        <div class="flinks">
+            <button type="button" onclick="openLegal('terms')">Kullanım Koşulları</button>
+            <button type="button" onclick="openLegal('privacy')">Gizlilik Politikası</button>
+            <button type="button" onclick="openLegal('service')">Hizmet Sözleşmesi</button>
+            <button type="button" onclick="openLegal('copyright')">Telif Hakları</button>
+            <button type="button" onclick="openLegal('cookies')">Çerez Politikası</button>
+            <button type="button" onclick="resetCookieConsent()">🍪 Çerez Tercihini Sıfırla</button>
+        </div>
+        <div>© <span id="year"></span> ASLAN Technologies · Tüm hakları saklıdır.</div>
+    </footer>
+</div>
+
+<script>
+/* ============================================================
+   GLOBAL STATE
+   ============================================================ */
+const state = {
+    attachments: [],
+    mediaFiles: [],
+    mediaPreviewUrls: [],
+    attachPreviewUrls: [],
+    chatHistory: [],
+    audioCtx: null,
+    sfxMuted: false,
+    lastAudioUrl: '',
+    deviceId: '',
+    authToken: '',
+    authReturnTab: '',
+    user: null,
+    quota: { ai: null, image: null }
+};
+
+const CHAT_MAX = 5;
+const TOKEN_KEY = 'aslan_auth_token_v1';
+const USER_KEY = 'aslan_auth_user_v1';
+const DEVICE_KEY = 'aslan_device_id_v1';
+const THEME_KEY = 'aslan_theme';
+const SFX_KEY = 'aslan_sfx_muted';
+const COOKIE_PREFS_KEY = 'aslan_cookie_prefs_v1';
+const SERVERLESS_INLINE_WARN_BYTES = 3 * 1024 * 1024;
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+function fmtSize(b) {
+    if (!b && b !== 0) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(2) + ' MB';
+}
+
+function fileIcon(t) {
+    t = String(t || '');
+    if (t.startsWith('image')) return '🖼️';
+    if (t.startsWith('video')) return '🎬';
+    if (t.startsWith('audio')) return '🎵';
+    if (t === 'application/pdf') return '📕';
+    return '📄';
+}
+
+async function parseApiResponse(res) {
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    const raw = await res.text();
+    if (ctype.includes('application/json')) {
+        try { return JSON.parse(raw); } catch (e) {}
+    }
+    if (res.status === 413) return { error: 'Gönderilen dosya veya istek sunucu boyut sınırını aştı (maks. 4.5 MB sunucusuz gövde).' };
+    if (res.status === 502 || res.status === 504) return { error: 'Sunucu geçici olarak yanıt veremedi veya zaman aşımına uğradı.' };
+    return { error: raw ? raw.slice(0, 180) : ('Sunucu hatası: HTTP ' + res.status) };
+}
+
+/* ============================================================
+   THEME & SOUND EFFECTS (Web Audio API)
+   ============================================================ */
+function applyTheme(theme) {
+    const t = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    const btn = $('btn-theme-toggle');
+    if (btn) btn.textContent = t === 'light' ? '🌙 Koyu Tema' : '☀️ Açık Tema';
+}
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = cur === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    sfx('click');
+}
+function applySfxState(muted) {
+    state.sfxMuted = !!muted;
+    const btn = $('btn-sfx-toggle');
+    if (btn) {
+        btn.textContent = state.sfxMuted ? '🔇 Sessiz' : '🔊 Efekt';
+        btn.setAttribute('aria-pressed', state.sfxMuted ? 'false' : 'true');
+    }
+}
+function toggleSfx() {
+    applySfxState(!state.sfxMuted);
+    try { localStorage.setItem(SFX_KEY, state.sfxMuted ? '1' : '0'); } catch (e) {}
+    if (!state.sfxMuted) sfx('click');
+}
+
+function getAudioCtx() {
+    if (!state.audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        state.audioCtx = new AC();
+    }
+    if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+    return state.audioCtx;
+}
+function tone(freq, dur, type, gain, delay) {
+    if (state.sfxMuted) return;
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    const t0 = ctx.currentTime + (delay || 0);
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gain == null ? 0.08 : gain, t0 + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+}
+const SFX = {
+    click:   () => tone(660, 0.07, 'triangle', 0.05),
+    success: () => { tone(523, 0.11, 'sine', 0.07); tone(784, 0.13, 'sine', 0.06, 0.09); },
+    error:   () => { tone(220, 0.16, 'sawtooth', 0.05); tone(165, 0.2, 'sawtooth', 0.05, 0.1); },
+    send:    () => { tone(880, 0.06, 'square', 0.035); },
+    receive: () => { tone(587, 0.09, 'sine', 0.05); tone(880, 0.1, 'sine', 0.04, 0.07); },
+    ready:   () => { tone(700, 0.08, 'triangle', 0.05); tone(1000, 0.09, 'triangle', 0.04, 0.07); }
+};
+function sfx(name) {
+    if (state.sfxMuted) return;
+    try { (SFX[name] || SFX.click)(); } catch (e) {}
+}
+
+/* ============================================================
+   COOKIELESS SESSION & AUTHENTICATION STATE
+   ============================================================ */
+function getDeviceId() {
+    if (state.deviceId) return state.deviceId;
+    var id = '';
+    try { id = localStorage.getItem(DEVICE_KEY) || ''; } catch (e) {}
+    if (!id) {
+        var rand = '';
+        try {
+            var buf = new Uint8Array(16);
+            (window.crypto || window.msCrypto).getRandomValues(buf);
+            for (var i = 0; i < buf.length; i++) rand += ('0' + buf[i].toString(16)).slice(-2);
+        } catch (e) {
+            rand = Math.random().toString(16).slice(2) + Date.now().toString(16);
+        }
+        id = 'aslan-' + rand;
+        try { localStorage.setItem(DEVICE_KEY, id); } catch (e) {}
+    }
+    state.deviceId = id;
+    return id;
+}
+
+const AUTH_WIN_PREFIX = '__ASLAN_AUTH__:';
+
+function readStoredAuth() {
+    var tok = '';
+    var usr = null;
+    try { tok = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
+    try {
+        var rawU = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY) || '';
+        if (rawU) usr = JSON.parse(rawU);
+    } catch (e) {}
+    if (!tok) {
+        try {
+            if (typeof window.name === 'string' && window.name.indexOf(AUTH_WIN_PREFIX) === 0) {
+                var parsed = JSON.parse(window.name.slice(AUTH_WIN_PREFIX.length));
+                if (parsed && parsed.token) {
+                    tok = String(parsed.token || '');
+                    usr = parsed.user || null;
+                }
+            }
+        } catch (e) {}
+    }
+    state.authToken = tok;
+    state.user = usr;
+}
+
+function saveStoredAuth(user, token) {
+    state.user = user || null;
+    state.authToken = token || '';
+    try {
+        if (token) {
+            localStorage.setItem(TOKEN_KEY, token);
+            sessionStorage.setItem(TOKEN_KEY, token);
+            localStorage.setItem(USER_KEY, JSON.stringify(user || {}));
+            sessionStorage.setItem(USER_KEY, JSON.stringify(user || {}));
+        } else {
+            localStorage.removeItem(TOKEN_KEY);
+            sessionStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem(USER_KEY);
+            sessionStorage.removeItem(USER_KEY);
+        }
+    } catch (e) {}
+    try {
+        if (token) {
+            window.name = AUTH_WIN_PREFIX + JSON.stringify({ token: token, user: user || {} });
+        } else if (typeof window.name === 'string' && window.name.indexOf(AUTH_WIN_PREFIX) === 0) {
+            window.name = '';
+        }
+    } catch (e) {}
+    renderAuthUI();
+}
+
+function renderAuthUI() {
+    var loggedIn = !!(state.authToken && state.user && state.user.username);
+    var nav = $('nav-auth-area');
+    if (nav) {
+        if (loggedIn) {
+            nav.innerHTML =
+                '<span class="pill-badge">👤 @' + esc(state.user.username) + '</span>' +
+                '<button type="button" class="icon-pill-btn" onclick="logoutUser()">Çıkış</button>';
+        } else {
+            nav.innerHTML =
+                '<button type="button" class="icon-pill-btn primary" onclick="openAuthModal(\'login\', \'ai\')">🔑 Giriş Yap</button>' +
+                '<button type="button" class="icon-pill-btn" onclick="openAuthModal(\'register\', \'ai\')">📝 Kayıt Ol</button>';
+        }
+    }
+    if ($('tts-auth-lock')) $('tts-auth-lock').style.display = loggedIn ? 'none' : 'block';
+    if ($('tts-workspace')) $('tts-workspace').style.display = loggedIn ? 'block' : 'none';
+    if ($('ai-auth-lock')) $('ai-auth-lock').style.display = loggedIn ? 'none' : 'block';
+    if ($('ai-workspace')) $('ai-workspace').style.display = loggedIn ? 'block' : 'none';
+}
+
+function applyQuotaSnapshot(snap) {
+    if (!snap) return;
+    if (snap.ai) state.quota.ai = snap.ai;
+    if (snap.image) state.quota.image = snap.image;
+    renderQuota();
+}
+
+function renderQuota() {
+    var ai = state.quota.ai;
+    if (ai && typeof ai.remaining === 'number' && $('quota-display')) {
+        $('quota-display').textContent = ai.remaining + '/' + (ai.limit || CHAT_MAX);
+    }
+    var img = state.quota.image;
+    var el = $('image-quota-display');
+    if (el && img) {
+        el.textContent = 'Görsel: Günlük ' + img.daily_remaining + '/' + img.daily_limit +
+                         ' · Haftalık ' + img.weekly_remaining + '/' + img.weekly_limit +
+                         ' · Aylık ' + img.monthly_remaining + '/' + img.monthly_limit;
+    }
+}
+
+function apiFetch(url, options) {
+    var opts = Object.assign({ credentials: 'omit' }, options || {});
+    var headers = Object.assign({}, opts.headers || {});
+    headers['X-Device-Id'] = getDeviceId();
+    if (state.authToken) {
+        headers['Authorization'] = 'Bearer ' + state.authToken;
+        headers['X-Auth-Token'] = state.authToken;
+    }
+    if (opts.body && !(opts.body instanceof FormData) && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+    }
+    opts.headers = headers;
+    return fetch(url, opts);
+}
+
+function fileToInline(file) {
+    return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () {
+            var result = String(reader.result || '');
+            var comma = result.indexOf(',');
+            resolve({
+                name: file.name,
+                mime_type: file.type || 'application/octet-stream',
+                size: file.size,
+                data: comma >= 0 ? result.slice(comma + 1) : result
+            });
+        };
+        reader.onerror = function () { reject(new Error('Dosya okunamadı: ' + file.name)); };
+        reader.readAsDataURL(file);
+    });
+}
+
+async function filesToInline(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) out.push(await fileToInline(list[i]));
+    return out;
+}
+
+/* ============================================================
+   COOKIE CONSENT (2 buton barda, Reddet detay modalda)
+   ============================================================ */
+function openCookieManager() {
+    var modal = $('cookie-modal');
+    if (modal) modal.classList.add('open');
+    sfx('click');
+}
+function closeCookieManager() {
+    var modal = $('cookie-modal');
+    if (modal) modal.classList.remove('open');
+}
+function acceptCookies() {
+    var prefs = { necessary: true, functional: true, analytics: true };
+    try {
+        localStorage.setItem('cookie_consent', 'accepted');
+        localStorage.setItem(COOKIE_PREFS_KEY, JSON.stringify(prefs));
+    } catch (e) {}
+    $('cookie-banner').classList.add('hidden');
+    closeCookieManager();
+    sfx('success');
+    syncConsent('accepted', prefs);
+}
+function rejectCookies() {
+    var prefs = { necessary: true, functional: false, analytics: false };
+    try {
+        localStorage.setItem('cookie_consent', 'rejected');
+        localStorage.setItem(COOKIE_PREFS_KEY, JSON.stringify(prefs));
+    } catch (e) {}
+    $('cookie-banner').classList.add('hidden');
+    closeCookieManager();
+    sfx('click');
+    syncConsent('rejected', prefs);
+}
+function saveCookiePreferences() {
+    var prefs = {
+        necessary: true,
+        functional: !!($('pref-functional') && $('pref-functional').checked),
+        analytics: !!($('pref-analytics') && $('pref-analytics').checked)
+    };
+    var mode = prefs.functional && prefs.analytics ? 'accepted' : 'custom';
+    try {
+        localStorage.setItem('cookie_consent', mode);
+        localStorage.setItem(COOKIE_PREFS_KEY, JSON.stringify(prefs));
+    } catch (e) {}
+    $('cookie-banner').classList.add('hidden');
+    closeCookieManager();
+    sfx('success');
+    syncConsent(mode, prefs);
+}
+function resetCookieConsent() {
+    try {
+        localStorage.removeItem('cookie_consent');
+        localStorage.removeItem(COOKIE_PREFS_KEY);
+    } catch (e) {}
+    $('cookie-banner').classList.remove('hidden');
+    sfx('click');
+}
+function syncConsent(consent, preferences) {
+    try {
+        apiFetch('/api/cookie-consent', {
+            method: 'POST',
+            body: JSON.stringify({ consent: consent, preferences: preferences || {} })
+        }).catch(() => {});
+    } catch (e) {}
+}
+
+(function initConsentAndSession() {
+    var consent = null;
+    try { consent = localStorage.getItem('cookie_consent'); } catch (e) {}
+    if (consent === 'accepted' || consent === 'rejected' || consent === 'custom') {
+        $('cookie-banner').classList.add('hidden');
+    }
+    try {
+        applyTheme(localStorage.getItem(THEME_KEY) || 'dark');
+        applySfxState(localStorage.getItem(SFX_KEY) === '1');
+    } catch (e) {}
+    readStoredAuth();
+    renderAuthUI();
+})();
+
+(async function initApp() {
+    if (state.authToken) {
+        try {
+            var meRes = await apiFetch('/api/auth/me', { method: 'GET' });
+            if (meRes.ok) {
+                var me = await meRes.json();
+                if (me.authenticated && me.user) {
+                    saveStoredAuth(me.user, state.authToken);
+                    if (me.quota) applyQuotaSnapshot(me.quota);
+                } else {
+                    saveStoredAuth(null, '');
+                }
+            } else if (meRes.status === 401) {
+                saveStoredAuth(null, '');
+            }
+        } catch (e) {}
+    }
+
+    try {
+        var hRes = await fetch('/api/health');
+        var dot = $('health-dot');
+        var txt = $('health-text');
+        if (hRes.ok) {
+            var h = await hRes.json();
+            if (dot) dot.className = 'status-dot ok';
+            if (txt) txt.textContent = h.capabilities && h.capabilities.media ? 'Tüm Sistemler Hazır' : 'Çevrimiçi';
+        } else {
+            if (dot) dot.className = 'status-dot err';
+            if (txt) txt.textContent = 'Kısıtlı';
+        }
+    } catch (e) {
+        var dot2 = $('health-dot');
+        var txt2 = $('health-text');
+        if (dot2) dot2.className = 'status-dot err';
+        if (txt2) txt2.textContent = 'Çevrimdışı';
+    }
+})();
+
+/* ============================================================
+   TABS & LEGAL PAGES
+   ============================================================ */
+function switchTab(name, btn) {
+    document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.remove('active');
+        b.setAttribute('aria-selected', 'false');
+    });
+    const panel = $('panel-' + name);
+    if (panel) panel.classList.add('active');
+    const targetBtn = btn || document.querySelector('.tab-btn[data-tab="' + name + '"]');
+    if (targetBtn) {
+        targetBtn.classList.add('active');
+        targetBtn.setAttribute('aria-selected', 'true');
+    }
+    sfx('click');
+}
+
+function showToast(message, type) {
+    const container = $('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + (type || 'info');
+    const span = document.createElement('span');
+    span.textContent = String(message || '');
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Bildirimi kapat');
+    close.textContent = '×';
+    close.onclick = () => toast.remove();
+    toast.appendChild(span);
+    toast.appendChild(close);
+    container.appendChild(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 4200);
+}
+
+function showLegalPage(pageId, btn) {
+    document.querySelectorAll('.legal-page').forEach(p => p.classList.remove('active'));
+    const page = $('legal-page-' + pageId);
+    if (page) page.classList.add('active');
+    const targetBtn = btn || document.querySelector('.legal-nav button[data-page="' + pageId + '"]');
+    if (targetBtn) {
+        document.querySelectorAll('.legal-nav button').forEach(b => b.classList.remove('active'));
+        targetBtn.classList.add('active');
+    }
+    sfx('click');
+    if (page) page.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function openLegal(pageId) {
+    switchTab('legal');
+    showLegalPage(pageId);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+document.addEventListener('DOMContentLoaded', () => {
+    $('year').textContent = new Date().getFullYear();
+    renderMediaParams();
+    updateTtsCounter();
+    updateTtsSliders();
+    updatePasswordChecklist();
+});
+
+/* ============================================================
+   AUTH MODAL & ACCOUNT ACTIONS
+   ============================================================ */
+function showAuthError(msg) {
+    const box = $('auth-error-box');
+    if (!box) return;
+    box.textContent = '⚠️ ' + String(msg || 'İşlem başarısız oldu.');
+    box.style.display = 'block';
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function clearAuthError() {
+    const box = $('auth-error-box');
+    if (box) {
+        box.textContent = '';
+        box.style.display = 'none';
+    }
+}
+function openAuthModal(mode, returnTab) {
+    if (returnTab !== undefined) state.authReturnTab = returnTab;
+    clearAuthError();
+    switchAuthMode(mode || 'login');
+    const modal = $('auth-modal');
+    if (modal) modal.classList.add('open');
+    sfx('click');
+}
+function closeAuthModal() {
+    clearAuthError();
+    const modal = $('auth-modal');
+    if (modal) modal.classList.remove('open');
+}
+function switchAuthMode(mode) {
+    clearAuthError();
+    const isReg = mode === 'register';
+    $('form-login').style.display = isReg ? 'none' : 'block';
+    $('form-register').style.display = isReg ? 'block' : 'none';
+    $('auth-tab-login').classList.toggle('active', !isReg);
+    $('auth-tab-register').classList.toggle('active', isReg);
+}
+function _setRule(id, ok) {
+    const el = $(id);
+    if (!el) return;
+    el.className = ok ? 'ok' : 'bad';
+    el.textContent = (ok ? '✓ ' : '○ ') + el.textContent.slice(2);
+}
+function updatePasswordChecklist() {
+    const u = ($('reg-username') ? $('reg-username').value : '').trim();
+    const p1 = $('reg-password') ? $('reg-password').value : '';
+    const p2 = $('reg-password-confirm') ? $('reg-password-confirm').value : '';
+    let unameOk = u.length >= 3 && u.length <= 32;
+    try { unameOk = /^[\p{L}\p{N}_.-]{3,32}$/u.test(u); } catch (e) { unameOk = /^[^\s]{3,32}$/.test(u); }
+    _setRule('chk-uname', unameOk);
+    _setRule('chk-len', p1.length >= 12);
+    _setRule('chk-upper', /[A-ZÇĞİÖŞÜ]/.test(p1));
+    _setRule('chk-lower', /[a-zçğıöşü]/.test(p1));
+    _setRule('chk-digit', /[0-9]/.test(p1));
+    _setRule('chk-sym', /[^A-Za-zÇĞİÖŞÜçğıöşü0-9\s]/.test(p1));
+    _setRule('chk-match', p1.length > 0 && p1 === p2);
+}
+function completeAuthSuccess(data, toastMsg) {
+    saveStoredAuth(data.user, data.token);
+    if (data.quota) applyQuotaSnapshot(data.quota);
+    closeAuthModal();
+    var dest = state.authReturnTab || 'ai';
+    state.authReturnTab = '';
+    if (dest !== 'tts' && dest !== 'ai') dest = 'ai';
+    switchTab(dest);
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) {}
+    try {
+        const focusEl = dest === 'tts' ? $('tts-text') : $('ai-input');
+        if (focusEl) focusEl.focus();
+    } catch (e) {}
+    try { sfx('success'); } catch (e) {}
+    showToast(toastMsg, 'success');
+}
+
+async function submitLogin(e) {
+    e.preventDefault();
+    clearAuthError();
+    const username = ($('login-username') ? $('login-username').value : '').trim();
+    const password = $('login-password') ? $('login-password').value : '';
+    if (!username) {
+        showAuthError('Lütfen kullanıcı adınızı girin.');
+        if ($('login-username')) $('login-username').focus();
+        return;
+    }
+    if (!password) {
+        showAuthError('Lütfen şifrenizi girin.');
+        if ($('login-password')) $('login-password').focus();
+        return;
+    }
+    const btn = $('btn-login-submit');
+    btn.disabled = true;
+    btn.textContent = 'Giriş yapılıyor...';
+    try {
+        const res = await apiFetch('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ username: username, password: password })
+        });
+        const data = await parseApiResponse(res);
+        if (!res.ok || !data.token) throw new Error(data.error || 'Giriş başarısız.');
+        $('login-password').value = '';
+        completeAuthSuccess(data, 'Hoş geldiniz, @' + data.user.username + '!');
+    } catch (err) {
+        sfx('error');
+        showAuthError(err.message);
+        showToast(err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Giriş Yap';
+    }
+}
+
+async function submitRegister(e) {
+    e.preventDefault();
+    clearAuthError();
+    const username = ($('reg-username') ? $('reg-username').value : '').trim();
+    const password = $('reg-password') ? $('reg-password').value : '';
+    const password_confirm = $('reg-password-confirm') ? $('reg-password-confirm').value : '';
+    updatePasswordChecklist();
+
+    if (username.length < 3) {
+        showAuthError('Kullanıcı adı en az 3 karakter olmalıdır.');
+        if ($('reg-username')) $('reg-username').focus();
+        return;
+    }
+    if (username.length > 32) {
+        showAuthError('Kullanıcı adı en fazla 32 karakter olabilir.');
+        if ($('reg-username')) $('reg-username').focus();
+        return;
+    }
+    let unameValid = false;
+    try { unameValid = /^[\p{L}\p{N}_.-]{3,32}$/u.test(username); } catch (ex) { unameValid = /^[^\s]{3,32}$/.test(username); }
+    if (!unameValid) {
+        showAuthError('Kullanıcı adı boşluk içeremez; yalnızca harf, rakam, nokta (.), tire (-) ve alt çizgi (_) kullanılabilir.');
+        if ($('reg-username')) $('reg-username').focus();
+        return;
+    }
+    if (password.length < 12) {
+        showAuthError('Şifre en az 12 karakter uzunluğunda olmalıdır.');
+        if ($('reg-password')) $('reg-password').focus();
+        return;
+    }
+    if (!/[A-ZÇĞİÖŞÜ]/.test(password)) {
+        showAuthError('Şifre en az 1 büyük harf (A-Z) içermelidir.');
+        if ($('reg-password')) $('reg-password').focus();
+        return;
+    }
+    if (!/[a-zçğıöşü]/.test(password)) {
+        showAuthError('Şifre en az 1 küçük harf (a-z) içermelidir.');
+        if ($('reg-password')) $('reg-password').focus();
+        return;
+    }
+    if (!/[0-9]/.test(password)) {
+        showAuthError('Şifre en az 1 rakam (0-9) içermelidir.');
+        if ($('reg-password')) $('reg-password').focus();
+        return;
+    }
+    if (!/[^A-Za-zÇĞİÖŞÜçğıöşü0-9\s]/.test(password)) {
+        showAuthError('Şifre en az 1 nokta veya özel sembol (. ! @ # $ % _ - vb.) içermelidir.');
+        if ($('reg-password')) $('reg-password').focus();
+        return;
+    }
+    if (password !== password_confirm) {
+        showAuthError('Girilen şifreler birbiriyle eşleşmiyor.');
+        if ($('reg-password-confirm')) $('reg-password-confirm').focus();
+        return;
+    }
+
+    const btn = $('btn-register-submit');
+    btn.disabled = true;
+    btn.textContent = 'Hesap oluşturuluyor...';
+    try {
+        const res = await apiFetch('/api/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({
+                username: username,
+                password: password,
+                password_confirm: password_confirm
+            })
+        });
+        const data = await parseApiResponse(res);
+        if (!res.ok || !data.token) throw new Error(data.error || 'Kayıt başarısız.');
+        $('reg-password').value = '';
+        $('reg-password-confirm').value = '';
+        completeAuthSuccess(data, 'Hesabınız oluşturuldu ve otomatik giriş yapıldı, @' + data.user.username + '!');
+    } catch (err) {
+        sfx('error');
+        showAuthError(err.message);
+        showToast(err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Hesap Oluştur ve Giriş Yap';
+    }
+}
+
+async function logoutUser() {
+    try {
+        await apiFetch('/api/auth/logout', { method: 'POST', body: '{}' });
+    } catch (e) {}
+    saveStoredAuth(null, '');
+    state.chatHistory = [];
+    sfx('click');
+    showToast('Oturum kapatıldı.', 'info');
+}
+
+function handleAuthRequired(errMsg) {
+    saveStoredAuth(null, '');
+    openAuthModal('login');
+    showToast(errMsg || 'Bu özelliği kullanmak için giriş yapmalısınız.', 'warn');
+}
+
+/* ============================================================
+   TTS STUDIO + AI CONTROLLED PLAYBACK
+   ============================================================ */
+function updateTtsCounter() {
+    const el = $('tts-text');
+    const cnt = $('tts-char-count');
+    if (!el || !cnt) return;
+    const len = el.value.length;
+    cnt.textContent = len + ' / 5000 karakter';
+    cnt.style.color = len >= 4500 ? 'var(--warn)' : 'var(--muted)';
+}
+function updateTtsSliders() {
+    const r = Number($('tts-rate').value || 0);
+    const p = Number($('tts-pitch').value || 0);
+    $('tts-rate-val').textContent = (r >= 0 ? '+' : '') + r + '%';
+    $('tts-pitch-val').textContent = (p >= 0 ? '+' : '') + p + 'Hz';
+}
+function resetTtsSliders() {
+    $('tts-rate').value = 0;
+    $('tts-pitch').value = 0;
+    updateTtsSliders();
+    sfx('click');
+}
+function clearTTS() {
+    $('tts-text').value = '';
+    updateTtsCounter();
+    sfx('click');
+}
+function stopAllAudioPlayback() {
+    const p = $('player');
+    if (p && typeof p.pause === 'function') {
+        try { p.pause(); p.currentTime = 0; } catch (e) {}
+    }
+    document.querySelectorAll('#chat-box audio, #media-result-box audio').forEach(a => {
+        try { a.pause(); a.currentTime = 0; } catch (e) {}
+    });
+}
+function syncTtsControlsFromAction(res) {
+    if (!res) return;
+    if (res.voice && $('tts-voice')) $('tts-voice').value = res.voice;
+    if (res.rate && $('tts-rate')) {
+        const rv = parseInt(String(res.rate).replace('%', ''), 10);
+        if (!isNaN(rv)) $('tts-rate').value = String(Math.max(-40, Math.min(60, rv)));
+    }
+    if (res.pitch && $('tts-pitch')) {
+        const pv = parseInt(String(res.pitch).replace(/hz/i, ''), 10);
+        if (!isNaN(pv)) $('tts-pitch').value = String(Math.max(-20, Math.min(20, pv)));
+    }
+    if (res.text && $('tts-text')) {
+        $('tts-text').value = res.text;
+        updateTtsCounter();
+    }
+    updateTtsSliders();
+}
+function handleTtsControlAction(res) {
+    syncTtsControlsFromAction(res);
+    const cmd = String(res.command || 'settings').toLowerCase();
+    if (cmd === 'stop' || cmd === 'pause') {
+        stopAllAudioPlayback();
+        showToast('Sesli okuma durduruldu.', 'info');
+        return;
+    }
+    if (cmd === 'play') {
+        const p = $('player');
+        if (res.text) {
+            generateAudio();
+            return;
+        }
+        if (p && p.src && p.src !== window.location.href) {
+            p.play().catch(() => {});
+            showToast('Ses oynatılıyor.', 'success');
+            return;
+        }
+        if ($('tts-text') && $('tts-text').value.trim()) {
+            generateAudio();
+            return;
+        }
+    }
+    showToast('Ses Stüdyosu ayarları güncellendi.', 'success');
+}
+
+async function generateAudio() {
+    const text = $('tts-text').value.trim();
+    const voice = $('tts-voice').value;
+    const rateVal = Number($('tts-rate').value || 0);
+    const pitchVal = Number($('tts-pitch').value || 0);
+    const rate = (rateVal >= 0 ? '+' : '') + rateVal + '%';
+    const pitch = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+    const btn = $('btn-speak');
+    if (!text) { showToast('Lütfen seslendirilecek metni yazın!', 'warn'); sfx('error'); return; }
+
+    btn.disabled = true;
+    btn.innerText = 'İşleniyor...';
+    try {
+        const res = await apiFetch('/api/tts', {
+            method: 'POST',
+            body: JSON.stringify({ text: text, voice: voice, rate: rate, pitch: pitch })
+        });
+        if (!res.ok) {
+            const errData = await parseApiResponse(res);
+            if (res.status === 401 || errData.auth_required) {
+                handleAuthRequired(errData.error);
+                return;
+            }
+            throw new Error(errData.error || ('API Hatası: ' + res.status));
+        }
+        const engine = res.headers.get('X-Engine') || 'edge-tts';
+        const blob = await res.blob();
+        if (state.lastAudioUrl) {
+            try { URL.revokeObjectURL(state.lastAudioUrl); } catch (e) {}
+        }
+        const url = URL.createObjectURL(blob);
+        state.lastAudioUrl = url;
+        $('player').src = url;
+        $('dl-link').href = url;
+        $('tts-engine-badge').textContent = 'Motor: ' + engine;
+        $('audio-box').style.display = 'block';
+        $('player').play().catch(() => {});
+        sfx('success');
+        showToast('Ses başarıyla oluşturuldu (' + engine + ').', 'success');
+    } catch (e) {
+        sfx('error');
+        showToast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = 'Sesi Oluştur ve Çal';
+    }
+}
+function copyLink() {
+    const url = $('dl-link').href;
+    if (!url || url === '#') return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(
+            () => { sfx('success'); showToast('Ses bağlantısı panoya kopyalandı!', 'success'); },
+            () => showToast('Bağlantı kopyalanamadı.', 'error')
+        );
+    } else {
+        showToast('Panoya kopyalama desteklenmiyor.', 'warn');
+    }
+}
+
+/* ============================================================
+   SAFE MARKDOWN RENDERER
+   ============================================================ */
+function renderSafeMarkdown(rawText) {
+    const text = String(rawText == null ? '' : rawText);
+    const codeBlocks = [];
+    const withPlaceholders = text.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, function (_, lang, code) {
+        const idx = codeBlocks.length;
+        codeBlocks.push({ lang: lang || 'kod', code: code.replace(/\n$/, '') });
+        return '@@CODEBLOCK_' + idx + '@@';
+    });
+
+    let safe = esc(withPlaceholders);
+    safe = safe.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
+    safe = safe.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    safe = safe.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    safe = safe.replace(/(https?:\/\/[^\s<>"']+)/g, function (url) {
+        return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
+    });
+
+    const lines = safe.split('\n');
+    let out = '';
+    let inList = false;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const m = line.match(/^@@CODEBLOCK_(\d+)@@$/);
+        if (m) {
+            if (inList) { out += '</ul>'; inList = false; }
+            const blk = codeBlocks[Number(m[1])];
+            out += '<div class="code-wrap"><div class="code-head"><span>' + esc(blk.lang) +
+                   '</span><button type="button" class="code-copy-btn" onclick="copyCodeBlock(this)">Kopyala</button></div>' +
+                   '<pre><code>' + esc(blk.code) + '</code></pre></div>';
+            continue;
+        }
+        const li = line.match(/^\s*[-*]\s+(.*)$/);
+        if (li) {
+            if (!inList) { out += '<ul>'; inList = true; }
+            out += '<li>' + li[1] + '</li>';
+        } else {
+            if (inList) { out += '</ul>'; inList = false; }
+            if (line.trim()) out += '<p>' + line + '</p>';
+        }
+    }
+    if (inList) out += '</ul>';
+    return '<div class="md-body">' + (out || '<p>' + esc(text) + '</p>') + '</div>';
+}
+
+function copyCodeBlock(btn) {
+    const code = btn.closest('.code-wrap').querySelector('code').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(() => showToast('Kod panoya kopyalandı.', 'success'));
+    }
+}
+
+/* ============================================================
+   AI CHAT — ATTACHMENTS & MESSAGES
+   ============================================================ */
+function handleFileSelect(input) {
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    files.forEach(f => {
+        if (f.size > SERVERLESS_INLINE_WARN_BYTES) {
+            showToast(f.name + ' (' + fmtSize(f.size) + ') 3 MB üzerinde; sunucusuz gövde sınırına takılabilir.', 'warn');
+        }
+        state.attachments.push(f);
+    });
+    input.value = '';
+    renderAttachTray();
+    sfx('ready');
+}
+
+function renderAttachTray() {
+    state.attachPreviewUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+    state.attachPreviewUrls = [];
+    const tray = $('attach-tray');
+    tray.innerHTML = '';
+    state.attachments.forEach((f, i) => {
+        const item = document.createElement('div');
+        item.className = 'attach-item';
+        const t = f.type || '';
+        if (t.startsWith('image')) {
+            const img = document.createElement('img');
+            const u = URL.createObjectURL(f);
+            state.attachPreviewUrls.push(u);
+            img.src = u;
+            img.alt = f.name;
+            item.appendChild(img);
+        } else {
+            const sp = document.createElement('div');
+            sp.className = 'thumb';
+            sp.textContent = fileIcon(t);
+            item.appendChild(sp);
+        }
+        const lbl = document.createElement('div');
+        lbl.textContent = f.name + ' (' + fmtSize(f.size) + ')';
+        lbl.title = f.name;
+        item.appendChild(lbl);
+        const rm = document.createElement('button');
+        rm.className = 'rm';
+        rm.type = 'button';
+        rm.textContent = '×';
+        rm.onclick = () => { state.attachments.splice(i, 1); renderAttachTray(); sfx('click'); };
+        item.appendChild(rm);
+        tray.appendChild(item);
+    });
+    tray.classList.toggle('active', state.attachments.length > 0);
+}
+
+function appendMsg(text, type, extraHtml) {
+    const box = $('chat-box');
+    const div = document.createElement('div');
+    div.className = 'msg ' + (type || 'bot');
+    if (type === 'bot') {
+        div.innerHTML = renderSafeMarkdown(text || '');
+        const actBar = document.createElement('div');
+        actBar.className = 'msg-actions';
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'msg-act-btn';
+        copyBtn.textContent = '📋 Kopyala';
+        copyBtn.onclick = () => {
+            if (navigator.clipboard) navigator.clipboard.writeText(text || '').then(() => showToast('Yanıt kopyalandı.', 'success'));
+        };
+        const speakBtn = document.createElement('button');
+        speakBtn.type = 'button';
+        speakBtn.className = 'msg-act-btn';
+        speakBtn.textContent = '🔊 Seslendir';
+        speakBtn.onclick = () => {
+            $('tts-text').value = (text || '').slice(0, 5000);
+            updateTtsCounter();
+            switchTab('tts');
+            generateAudio();
+        };
+        actBar.appendChild(copyBtn);
+        actBar.appendChild(speakBtn);
+        div.appendChild(actBar);
+    } else {
+        div.textContent = text == null ? '' : String(text);
+    }
+    if (extraHtml) {
+        const holder = document.createElement('div');
+        holder.innerHTML = extraHtml;
+        while (holder.firstChild) div.appendChild(holder.firstChild);
+    }
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+    return div;
+}
+
+function clearChat() {
+    state.chatHistory = [];
+    $('chat-box').innerHTML = '<div class="msg bot"><div class="md-body"><p>Sohbet temizlendi. Yeni bir konuyla devam edebilirsiniz! 🤖</p></div></div>';
+    sfx('click');
+}
+
+function updateQuota(remaining) {
+    if (state.quota.ai) {
+        state.quota.ai.remaining = remaining;
+        if (typeof state.quota.ai.used === 'number') {
+            state.quota.ai.used = Math.max(0, CHAT_MAX - remaining);
+        }
+    }
+    if ($('quota-display')) $('quota-display').textContent = remaining + '/' + CHAT_MAX;
+}
+
+async function uploadFiles(files) {
+    return filesToInline(files);
+}
+
+function toggleSubPanel(id) {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle('open');
+    sfx('click');
+}
+
+function appendImageResult(res) {
+    if (!res) return;
+    var box = $('chat-box');
+    var div = document.createElement('div');
+    div.className = 'msg bot';
+    if (res.success && (res.image_base64 || res.data_url)) {
+        var src = res.data_url || ('data:' + (res.mime_type || 'image/png') + ';base64,' + res.image_base64);
+        div.innerHTML =
+            '<div>🎨 <strong>Görsel üretildi</strong></div>' +
+            '<img src="' + esc(src) + '" alt="Üretilen görsel" class="media-preview">' +
+            '<div class="media-card">' +
+                '<div class="mc-icon">🖼️</div>' +
+                '<div class="mc-info">' +
+                    '<div class="mc-name">' + esc(res.prompt || 'aslan-gorsel.png') + '</div>' +
+                    '<div class="mc-size">Motor: ' + esc(res.engine || 'Aslan Görsel') + '</div>' +
+                '</div>' +
+                '<a class="download-btn" href="' + esc(src) + '" download="aslan-gorsel.png">⬇️ İndir</a>' +
+            '</div>';
+        sfx('success');
+    } else {
+        div.innerHTML = '<div>⚠️ Görsel üretilemedi: ' + esc(res.error || 'bilinmeyen hata') + '</div>';
+        sfx('error');
+    }
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+}
+
+function openImageStudio() {
+    var box = $('image-studio');
+    if (!box) return;
+    var open = box.classList.toggle('open');
+    if (open && $('image-prompt')) $('image-prompt').focus();
+    sfx('click');
+}
+
+async function generateImage() {
+    var promptEl = $('image-prompt');
+    var prompt = promptEl ? promptEl.value.trim() : '';
+    if (!prompt) { sfx('error'); showToast('Görsel için bir açıklama yazın.', 'warn'); return; }
+    var btn = $('btn-generate-image');
+    btn.disabled = true;
+    btn.innerText = 'Üretiliyor...';
+    appendMsg('🎨 Görsel üretiliyor: ' + prompt, 'user');
+    try {
+        var res = await apiFetch('/api/image', {
+            method: 'POST',
+            body: JSON.stringify({ prompt: prompt })
+        });
+        var data = await parseApiResponse(res);
+        if (res.status === 401 || data.auth_required) {
+            handleAuthRequired(data.error);
+            return;
+        }
+        if (!res.ok) throw new Error(data.error || 'Görsel üretilemedi');
+        appendImageResult(data);
+        if (data.quota) applyQuotaSnapshot(data.quota);
+        promptEl.value = '';
+    } catch (e) {
+        appendMsg('⚠️ Görsel üretilemedi: ' + e.message, 'error');
+        sfx('error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '🎨 Görsel Üret';
+    }
+}
+
+function openSocialStudio() {
+    var box = $('social-studio');
+    if (!box) return;
+    var open = box.classList.toggle('open');
+    if (open && $('social-url')) $('social-url').focus();
+    sfx('click');
+}
+
+async function downloadSocial() {
+    var el = $('social-url');
+    var url = el ? el.value.trim() : '';
+    if (!url) { sfx('error'); showToast('Video bağlantısını yapıştırın.', 'warn'); return; }
+    var btn = $('btn-social');
+    btn.disabled = true;
+    btn.innerText = 'İndiriliyor...';
+    appendMsg('⬇️ Video indiriliyor: ' + url, 'user');
+    try {
+        var res = await apiFetch('/api/media/social', {
+            method: 'POST',
+            body: JSON.stringify({ url: url })
+        });
+        var data = await parseApiResponse(res);
+        if (!res.ok || !data.success) throw new Error(data.error || 'İndirme başarısız');
+        appendMediaResult(data);
+        if (el) el.value = '';
+    } catch (e) {
+        appendMsg('⚠️ ' + e.message, 'error');
+        sfx('error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '⬇️ Videoyu İndir';
+    }
+}
+
+function buildMediaCardHtml(res) {
+    if (!res || !res.success) {
+        return '<div>⚠️ İşlem tamamlanamadı: ' + esc((res && res.error) || 'bilinmeyen hata') + '</div>';
+    }
+    const label = esc(res.label || res.operation || 'Medya İşlemi');
+    const mime = res.mime_type || '';
+    const isAudio = mime.startsWith('audio');
+    const isVideo = mime.startsWith('video');
+    const isImage = mime.startsWith('image');
+    const src = res.data_url || (res.image_base64 ? ('data:' + (mime || 'image/png') + ';base64,' + res.image_base64) : '') || res.download_url || '';
+    const dlName = esc(res.output_file || (isImage ? 'aslan-gorsel.png' : isAudio ? 'aslan-ses.mp3' : 'aslan-video.mp4'));
+    let preview = '';
+    if (src) {
+        if (isAudio) {
+            preview = '<audio controls preload="none" src="' + esc(src) + '" style="width:100%;margin-top:8px;"></audio>';
+        } else if (isImage) {
+            preview = '<img src="' + esc(src) + '" alt="' + label + '" class="media-preview">';
+        } else if (isVideo) {
+            preview = '<video controls preload="none" src="' + esc(src) + '" class="media-preview"></video>';
+        }
+    }
+    const sum = res.summary ? (' · ' + (res.summary.duration ? res.summary.duration + 's' : '') + (res.summary.codecs && res.summary.codecs.length ? ' · ' + res.summary.codecs.join('/') : '')) : '';
+    return '<div>✅ <strong>' + label + '</strong> tamamlandı.</div>' + preview +
+        '<div class="media-card">' +
+            '<div class="mc-icon">' + (isAudio ? '🎵' : isImage ? '🖼️' : '🎬') + '</div>' +
+            '<div class="mc-info">' +
+                '<div class="mc-name">' + dlName + '</div>' +
+                '<div class="mc-size">' + fmtSize(res.size) + esc(sum) + '</div>' +
+            '</div>' +
+            (src ? '<a class="download-btn" href="' + esc(src) + '" download="' + dlName + '">⬇️ İndir</a>' : '') +
+        '</div>';
+}
+
+function appendMediaResult(res) {
+    if (!res) return;
+    if (res.operation === 'tts_control') {
+        handleTtsControlAction(res);
+        return;
+    }
+    if (res.operation === 'tts' && res.success) {
+        syncTtsControlsFromAction(res);
+        const src = res.data_url || res.download_url || '';
+        if (src && $('player')) {
+            $('player').src = src;
+            if ($('dl-link')) $('dl-link').href = src;
+            if ($('audio-box')) $('audio-box').style.display = 'block';
+            if (res.autoplay !== false) $('player').play().catch(() => {});
+        }
+    }
+    const box = $('chat-box');
+    const div = document.createElement('div');
+    div.className = 'msg bot';
+    div.innerHTML = buildMediaCardHtml(res);
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+    sfx(res.success ? 'success' : 'error');
+}
+
+function runAICommand(cmd) {
+    const input = $('ai-input');
+    if (!input) return;
+    input.value = cmd;
+    sfx('click');
+    sendAI();
+}
+
+async function sendAI() {
+    const input = $('ai-input');
+    const btn = $('btn-ai');
+    const text = input.value.trim();
+    const pending = state.attachments.slice();
+
+    if (!text && !pending.length) { sfx('error'); return; }
+
+    let chips = '';
+    if (pending.length) {
+        chips = '<div class="msg-files">' + pending.map(f =>
+            '<span class="chip">' + fileIcon(f.type) + ' ' + esc(f.name) + '</span>').join('') + '</div>';
+    }
+    appendMsg(text || '(dosya gönderildi)', 'user', chips);
+    input.value = '';
+    state.attachments = [];
+    renderAttachTray();
+
+    btn.disabled = true;
+    btn.innerText = 'Düşünüyor...';
+    sfx('send');
+
+    const loadingId = 'ld-' + Date.now();
+    const loading = document.createElement('div');
+    loading.className = 'msg bot';
+    loading.id = loadingId;
+    loading.innerHTML = '<span class="loading"></span><span class="loading"></span><span class="loading"></span>';
+    $('chat-box').appendChild(loading);
+    $('chat-box').scrollTop = $('chat-box').scrollHeight;
+
+    try {
+        var inlineFiles = [];
+        if (pending.length) {
+            try { inlineFiles = await filesToInline(pending); }
+            catch (e) { appendMsg('Dosya okunamadı: ' + e.message, 'error'); }
+        }
+
+        const res = await apiFetch('/api/ai', {
+            method: 'POST',
+            body: JSON.stringify({
+                message: text,
+                files: inlineFiles,
+                history: state.chatHistory.slice(-10)
+            })
+        });
+        const data = await parseApiResponse(res);
+        const ld = $(loadingId); if (ld) ld.remove();
+
+        if (res.status === 401 || data.auth_required) {
+            handleAuthRequired(data.error);
+            return;
+        }
+        if (!res.ok) {
+            appendMsg(data.error || 'Bir hata oluştu', 'error');
+            if (data.quota) applyQuotaSnapshot(data.quota);
+            sfx('error');
+        } else {
+            appendMsg(data.reply, 'bot');
+            sfx('receive');
+            if (text) state.chatHistory.push({ role: 'user', text: text });
+            if (data.reply) state.chatHistory.push({ role: 'model', text: data.reply });
+            if (state.chatHistory.length > 20) state.chatHistory = state.chatHistory.slice(-20);
+
+            if (data.quota) {
+                applyQuotaSnapshot(data.quota);
+            } else if (typeof data.remaining === 'number') {
+                updateQuota(data.remaining);
+            }
+            if (data.image_result) {
+                setTimeout(() => appendImageResult(data.image_result), 200);
+            } else if (data.media_result) {
+                setTimeout(() => appendMediaResult(data.media_result), 200);
+            }
+        }
+    } catch (e) {
+        const ld = $(loadingId); if (ld) ld.remove();
+        appendMsg('Bağlantı hatası: ' + e.message, 'error');
+        sfx('error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = 'Gönder';
+    }
+}
+
+/* ============================================================
+   MEDIA STUDIO (19 FFmpeg Operations)
+   ============================================================ */
+function handleMediaSelect(input) {
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    files.forEach(f => {
+        if (f.size > SERVERLESS_INLINE_WARN_BYTES) {
+            showToast(f.name + ' (' + fmtSize(f.size) + ') büyük boyutlu; yükleme zaman alabilir.', 'warn');
+        }
+        state.mediaFiles.push(f);
+    });
+    input.value = '';
+    renderMediaTray();
+    sfx('ready');
+}
+
+function renderMediaTray() {
+    state.mediaPreviewUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+    state.mediaPreviewUrls = [];
+    const tray = $('media-tray');
+    if (!tray) return;
+    tray.innerHTML = '';
+    state.mediaFiles.forEach((f, i) => {
+        const item = document.createElement('div');
+        item.className = 'attach-item';
+        const t = f.type || '';
+        if (t.startsWith('image')) {
+            const img = document.createElement('img');
+            const u = URL.createObjectURL(f);
+            state.mediaPreviewUrls.push(u);
+            img.src = u;
+            img.alt = f.name;
+            item.appendChild(img);
+        } else {
+            const sp = document.createElement('div');
+            sp.className = 'thumb';
+            sp.textContent = fileIcon(t);
+            item.appendChild(sp);
+        }
+        const lbl = document.createElement('div');
+        lbl.textContent = (i + 1) + '. ' + f.name + ' (' + fmtSize(f.size) + ')';
+        lbl.title = f.name;
+        item.appendChild(lbl);
+        const rm = document.createElement('button');
+        rm.className = 'rm';
+        rm.type = 'button';
+        rm.textContent = '×';
+        rm.onclick = () => { state.mediaFiles.splice(i, 1); renderMediaTray(); sfx('click'); };
+        item.appendChild(rm);
+        tray.appendChild(item);
+    });
+    tray.classList.toggle('active', state.mediaFiles.length > 0);
+}
+
+const MEDIA_PARAM_DEFS = {
+    extract_audio: [{ id: 'format', label: 'Ses Formatı', type: 'select', options: ['mp3', 'wav', 'aac', 'm4a', 'opus', 'ogg', 'flac'], val: 'mp3' }],
+    compress_audio: [
+        { id: 'bitrate', label: 'Bit Hızı', type: 'select', options: ['64k', '96k', '128k', '192k'], val: '96k' },
+        { id: 'format', label: 'Format', type: 'select', options: ['mp3', 'm4a'], val: 'mp3' }
+    ],
+    mute_video: [],
+    change_speed: [{ id: 'speed', label: 'Hız Çarpanı (0.5 - 2.0)', type: 'select', options: ['0.5', '0.75', '1.25', '1.5', '2.0'], val: '1.25' }],
+    trim_video: [
+        { id: 'start', label: 'Başlangıç (sn veya HH:MM:SS)', type: 'text', val: '00:00:00' },
+        { id: 'duration', label: 'Süre (saniye)', type: 'text', val: '10' }
+    ],
+    optimize_video: [
+        { id: 'max_side', label: 'Maks. Çözünürlük (px)', type: 'number', val: '1280' },
+        { id: 'crf', label: 'Sıkıştırma (18-36)', type: 'number', val: '28' }
+    ],
+    extract_thumbnail: [{ id: 'time', label: 'Kare Zamanı (saniye)', type: 'number', val: '1' }],
+    merge_video_image: [
+        { id: 'position', label: 'Konum', type: 'select', options: ['bottom-right', 'bottom-left', 'top-right', 'top-left', 'center'], val: 'bottom-right' },
+        { id: 'scale', label: 'Ölçek (0.1 - 1.0)', type: 'text', val: '0.25' },
+        { id: 'opacity', label: 'Opaklık (0.1 - 1.0)', type: 'text', val: '1.0' }
+    ],
+    stitch_media: [
+        { id: 'transition', label: 'Geçiş', type: 'select', options: ['none', 'fade'], val: 'fade' },
+        { id: 'per_image_duration', label: 'Görsel Başına Süre (sn)', type: 'number', val: '3' }
+    ],
+    slideshow_with_music: [
+        { id: 'transition', label: 'Geçiş', type: 'select', options: ['fade', 'none'], val: 'fade' },
+        { id: 'per_image_duration', label: 'Görsel Başına Süre (sn)', type: 'number', val: '3' }
+    ],
+    merge_audio: [{ id: 'format', label: 'Çıktı Formatı', type: 'select', options: ['mp3', 'wav', 'm4a'], val: 'mp3' }],
+    denoise_audio: [{ id: 'strength', label: 'Temizleme Gücü (0.1 - 1.0)', type: 'text', val: '0.6' }],
+    crop_image: [
+        { id: 'x', label: 'X Başlangıç', type: 'number', val: '0' },
+        { id: 'y', label: 'Y Başlangıç', type: 'number', val: '0' },
+        { id: 'width', label: 'Genişlik (px)', type: 'number', val: '400' },
+        { id: 'height', label: 'Yükseklik (px)', type: 'number', val: '300' }
+    ],
+    remove_background: [
+        { id: 'color', label: 'Kaldırılacak Renk', type: 'select', options: ['green', 'white', 'black', 'blue', 'red'], val: 'green' },
+        { id: 'tolerance', label: 'Tolerans (0.05 - 0.5)', type: 'text', val: '0.18' }
+    ],
+    resize: [
+        { id: 'width', label: 'Genişlik (px)', type: 'number', val: '1280' },
+        { id: 'height', label: 'Yükseklik (px)', type: 'number', val: '720' }
+    ],
+    convert: [{ id: 'format', label: 'Hedef Format', type: 'select', options: ['mp4', 'webm', 'mkv', 'mov', 'gif', 'mp3', 'wav', 'aac', 'm4a', 'ogg', 'png', 'jpg', 'webp'], val: 'mp4' }],
+    video_concat: [{ id: 'quality', label: 'Kodlama Modu', type: 'select', options: ['reencode', 'copy'], val: 'reencode' }],
+    combine_audio_video: [],
+    overlay_audio: []
+};
+
+function renderMediaParams() {
+    const op = $('media-op') ? $('media-op').value : '';
+    const box = $('media-params');
+    if (!box) return;
+    const defs = MEDIA_PARAM_DEFS[op] || [];
+    box.innerHTML = '';
+    defs.forEach(d => {
+        const wrap = document.createElement('div');
+        const lbl = document.createElement('label');
+        lbl.setAttribute('for', 'mp-' + d.id);
+        lbl.textContent = d.label;
+        wrap.appendChild(lbl);
+        if (d.type === 'select') {
+            const sel = document.createElement('select');
+            sel.id = 'mp-' + d.id;
+            sel.dataset.param = d.id;
+            d.options.forEach(o => {
+                const opt = document.createElement('option');
+                opt.value = o;
+                opt.textContent = o;
+                if (o === d.val) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            wrap.appendChild(sel);
+        } else {
+            const inp = document.createElement('input');
+            inp.type = d.type;
+            inp.id = 'mp-' + d.id;
+            inp.dataset.param = d.id;
+            inp.value = d.val;
+            wrap.appendChild(inp);
+        }
+        box.appendChild(wrap);
+    });
+}
+
+async function processMedia() {
+    if (!state.mediaFiles.length) {
+        showToast('Lütfen en az bir medya dosyası seçin.', 'warn');
+        sfx('error');
+        return;
+    }
+    const op = $('media-op').value;
+    const params = {};
+    document.querySelectorAll('#media-params [data-param]').forEach(el => {
+        params[el.dataset.param] = el.value;
+    });
+    const btn = $('btn-media-process');
+    const outBox = $('media-result-box');
+    btn.disabled = true;
+    btn.innerText = 'İşleniyor...';
+    outBox.innerHTML = '';
+
+    try {
+        const inlineFiles = await filesToInline(state.mediaFiles);
+        const res = await apiFetch('/api/media/process', {
+            method: 'POST',
+            body: JSON.stringify({ operation: op, files: inlineFiles, params: params })
+        });
+        const data = await parseApiResponse(res);
+        if (!res.ok || !data.success) throw new Error(data.error || 'İşlem başarısız oldu.');
+        outBox.innerHTML = buildMediaCardHtml(data);
+        sfx('success');
+        showToast('Medya işlemi tamamlandı!', 'success');
+    } catch (e) {
+        outBox.innerHTML = '<div class="msg error" style="max-width:100%;">⚠️ ' + esc(e.message) + '</div>';
+        sfx('error');
+        showToast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '⚙️ İşlemi Başlat';
+    }
+}
+
+async function downloadSocialFromStudio() {
+    const el = $('media-social-url');
+    const url = el ? el.value.trim() : '';
+    if (!url) { showToast('Video bağlantısı yapıştırın.', 'warn'); sfx('error'); return; }
+    const btn = $('btn-media-social');
+    const outBox = $('media-result-box');
+    btn.disabled = true;
+    btn.innerText = 'İndiriliyor...';
+    try {
+        const res = await apiFetch('/api/media/social', {
+            method: 'POST',
+            body: JSON.stringify({ url: url })
+        });
+        const data = await parseApiResponse(res);
+        if (!res.ok || !data.success) throw new Error(data.error || 'İndirme başarısız.');
+        outBox.innerHTML = buildMediaCardHtml(data);
+        sfx('success');
+        showToast('Video indirme tamamlandı!', 'success');
+    } catch (e) {
+        outBox.innerHTML = '<div class="msg error" style="max-width:100%;">⚠️ ' + esc(e.message) + '</div>';
+        sfx('error');
+        showToast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '⬇️ Bağlantıdan İndir';
+    }
+}
+
+/* ============================================================
+   VOICE RECORDING & DRAG-DROP
+   ============================================================ */
+let mediaRecorder = null, recordedChunks = [], recordStream = null;
+async function toggleRecord() {
+    const btn = $('btn-mic');
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        btn.classList.remove('recording');
+        return;
+    }
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+        showToast('Tarayıcınız ses kaydını desteklemiyor.', 'warn');
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordStream = stream;
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = e => { if (e.data.size) recordedChunks.push(e.data); };
+        mediaRecorder.onstop = () => {
+            stream.getTracks().forEach(t => t.stop());
+            const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+            const file = new File([blob], 'kayit.webm', { type: 'audio/webm' });
+            state.attachments.push(file);
+            renderAttachTray();
+            sfx('ready');
+        };
+        mediaRecorder.start();
+        btn.classList.add('recording');
+        sfx('click');
+    } catch (e) {
+        showToast('Mikrofon erişimi reddedildi: ' + e.message, 'error');
+        sfx('error');
+    }
+}
+
+$('chat-box').addEventListener('dragover', e => { e.preventDefault(); e.currentTarget.style.outline = '2px dashed #ef4444'; });
+$('chat-box').addEventListener('dragleave', e => { e.currentTarget.style.outline = ''; });
+$('chat-box').addEventListener('drop', e => {
+    e.preventDefault();
+    e.currentTarget.style.outline = '';
+    const files = Array.from(e.dataTransfer.files || []);
+    files.forEach(f => state.attachments.push(f));
+    renderAttachTray();
+    sfx('ready');
+});
+
+const dz = $('media-dropzone');
+if (dz) {
+    dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+    dz.addEventListener('drop', e => {
+        e.preventDefault();
+        dz.classList.remove('dragover');
+        const files = Array.from(e.dataTransfer.files || []);
+        files.forEach(f => state.mediaFiles.push(f));
+        renderMediaTray();
+        sfx('ready');
+    });
+}
+</script>
+</body>
+</html>

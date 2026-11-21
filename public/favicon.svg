@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="aslanGrad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#0b1120"/>
+  <path d="M32 7L54 17V33C54 46.2 44.6 55.6 32 59C19.4 55.6 10 46.2 10 33V17L32 7Z" fill="url(#aslanGrad)" fill-opacity="0.18" stroke="url(#aslanGrad)" stroke-width="2.5"/>
+  <path d="M32 15L44 45H37.8L35.3 38.2H28.7L26.2 45H20L32 15ZM30.5 33.2H33.5L32 28.4L30.5 33.2Z" fill="#ffffff"/>
+</svg>

@@ -1,8 +1,43 @@
 {
   "version": 2,
+  "functions": {
+    "api/*.py": {
+      "memory": 2048,
+      "maxDuration": 60,
+      "includeFiles": "core/**",
+      "excludeFiles": "{public/**,test_*.py,server*.py,README.md,start.sh,data/**}"
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" },
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, private" },
+        { "key": "Pragma", "value": "no-cache" }
+      ]
+    }
+  ],
   "rewrites": [
+    { "source": "/api/health", "destination": "/api/health.py" },
+    { "source": "/api/auth/:path*", "destination": "/api/auth.py" },
     { "source": "/api/tts", "destination": "/api/tts.py" },
     { "source": "/api/ai", "destination": "/api/ai.py" },
+    { "source": "/api/media/process", "destination": "/api/media.py" },
+    { "source": "/api/media/social", "destination": "/api/social.py" },
+    { "source": "/api/image", "destination": "/api/image.py" },
+    { "source": "/api/quota", "destination": "/api/quota.py" },
+    { "source": "/api/cookie-consent", "destination": "/api/consent.py" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
