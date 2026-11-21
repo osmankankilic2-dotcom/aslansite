@@ -1,8 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/*.py": {
-      "memory": 2048,
+    "api/index.py": {
       "maxDuration": 60,
       "includeFiles": "core/**",
       "excludeFiles": "{public/**,test_*.py,server*.py,README.md,start.sh,data/**}"
@@ -29,15 +28,7 @@
     }
   ],
   "rewrites": [
-    { "source": "/api/health", "destination": "/api/health.py" },
-    { "source": "/api/auth/:path*", "destination": "/api/auth.py" },
-    { "source": "/api/tts", "destination": "/api/tts.py" },
-    { "source": "/api/ai", "destination": "/api/ai.py" },
-    { "source": "/api/media/process", "destination": "/api/media.py" },
-    { "source": "/api/media/social", "destination": "/api/social.py" },
-    { "source": "/api/image", "destination": "/api/image.py" },
-    { "source": "/api/quota", "destination": "/api/quota.py" },
-    { "source": "/api/cookie-consent", "destination": "/api/consent.py" },
+    { "source": "/api/:path*", "destination": "/api/index.py?__route=/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

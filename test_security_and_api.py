@@ -340,69 +340,81 @@ def main():
           ctrl.get("success") and ctrl.get("operation") == "tts_control" and ctrl.get("command") == "stop" and ctrl.get("rate") == "+20%")
 
     # ------------------------------------------------------------------
-    section("7. VERCEL SERVERLESS HANDLER'LAR (api/*.py)")
-    from api import ai as api_ai, auth as api_auth, consent as api_consent
-    from api import health as api_health, image as api_image, media as api_media
-    from api import quota as api_quota, social as api_social, tts as api_tts
+    section("7. VERCEL TEK ROUTER HANDLER (api/index.py -> core/handlers/*)")
+    from api import index as api_index
 
-    h_res = FakeHandler(api_health.handler, "GET").run()
-    check("api/health.py → 200", h_res.status == 200 and h_res.json().get("capabilities", {}).get("free_ai"))
+    h_res = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/health").run()
+    check("api/index.py /api/health → 200", h_res.status == 200 and h_res.json().get("capabilities", {}).get("free_ai"))
 
-    # Vercel auth handler: register -> login -> me -> AI -> TTS
+    # Vercel auth handler: register -> me -> AI -> TTS
     v_reg = FakeHandler(
-        api_auth.handler, "POST", path="/api/auth/register",
+        api_index.handler, "POST", path="/api/index.py?__route=/api/auth/register",
         body=json.dumps({"username": "VercelUser", "password": good_pw, "password_confirm": good_pw}).encode("utf-8"),
     ).run()
-    check("api/auth.py /register → 201", v_reg.status == 201 and v_reg.json().get("token"))
+    check("api/index.py /api/auth/register → 201", v_reg.status == 201 and v_reg.json().get("token"))
     v_tok = v_reg.json()["token"]
 
-    v_ai_unauth = FakeHandler(api_ai.handler, "POST", body=b'{"message":"hi"}').run()
-    v_tts_unauth = FakeHandler(api_tts.handler, "POST", body=b'{"text":"hi"}').run()
-    check("api/ai.py & api/tts.py unauthenticated → 401", v_ai_unauth.status == 401 and v_tts_unauth.status == 401)
+    v_me = FakeHandler(
+        api_index.handler, "GET", path="/api/index.py?__route=/api/auth/me",
+        headers={"Authorization": f"Bearer {v_tok}"},
+    ).run()
+    check("api/index.py /api/auth/me → 200", v_me.status == 200 and v_me.json().get("authenticated"))
+
+    v_ai_unauth = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/ai", body=b'{"message":"hi"}').run()
+    v_tts_unauth = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/tts", body=b'{"text":"hi"}').run()
+    check("api/index.py /api/ai & /api/tts unauthenticated → 401", v_ai_unauth.status == 401 and v_tts_unauth.status == 401)
 
     with mock.patch.object(ai_engine, "generate_reply", return_value=("Vercel AI yaniti", None)):
         v_ai_ok = FakeHandler(
-            api_ai.handler, "POST",
+            api_index.handler, "POST", path="/api/index.py?__route=/api/ai",
             body=json.dumps({"message": "Merhaba"}).encode("utf-8"),
             headers={"Authorization": f"Bearer {v_tok}"},
         ).run()
-    check("api/ai.py authenticated → 200 + DB quota=4",
+    check("api/index.py /api/ai authenticated → 200 + DB quota=4",
           v_ai_ok.status == 200 and v_ai_ok.json()["quota"]["ai"]["remaining"] == 4)
 
-    v_q = FakeHandler(api_quota.handler, "GET", headers={"Authorization": f"Bearer {v_tok}"}).run()
-    check("api/quota.py returns account-bound quota=4",
+    v_q = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/quota", headers={"Authorization": f"Bearer {v_tok}"}).run()
+    check("api/index.py /api/quota returns account-bound quota=4",
           v_q.status == 200 and v_q.json().get("account_bound") and v_q.json()["ai"]["remaining"] == 4)
 
     # api/media.py crop + cleanup
     before_files = set(os.listdir(cfg.MEDIA_TEMP_DIR))
     img_b64 = base64.b64encode(Path(imgs[0]).read_bytes()).decode("ascii")
-    m_res = FakeHandler(api_media.handler, "POST", body=json.dumps({
+    m_res = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/media/process", body=json.dumps({
         "operation": "crop_image",
         "files": [{"name": "a.png", "mime_type": "image/png", "data": img_b64}],
         "params": {"x": 0, "y": 0, "width": 100, "height": 80},
     }).encode("utf-8")).run()
     after_files = set(os.listdir(cfg.MEDIA_TEMP_DIR))
-    check("api/media.py crop_image → 200 & /tmp clean", m_res.status == 200 and before_files == after_files)
+    check("api/index.py /api/media/process crop_image → 200 & /tmp clean", m_res.status == 200 and before_files == after_files)
 
-    v_soc = FakeHandler(api_social.handler, "POST", body=b'{"url":"http://127.0.0.1/?youtube.com"}').run()
-    check("api/social.py SSRF → 400", v_soc.status == 400)
+    v_soc = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/media/social", body=b'{"url":"http://127.0.0.1/?youtube.com"}').run()
+    check("api/index.py /api/media/social SSRF → 400", v_soc.status == 400)
 
-    v_con = FakeHandler(api_consent.handler, "POST", body=json.dumps({
+    v_con = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/cookie-consent", body=json.dumps({
         "consent": "custom", "preferences": {"functional": True, "analytics": False}
     }).encode("utf-8")).run()
-    check("api/consent.py custom prefs → 200", v_con.status == 200 and v_con.json().get("consent") == "custom")
+    check("api/index.py /api/cookie-consent custom prefs → 200", v_con.status == 200 and v_con.json().get("consent") == "custom")
 
     with mock.patch.object(ai_engine, "generate_image", return_value=(False, {"quota_exceeded": False, "error": "err"})):
         v_img_err = FakeHandler(
-            api_image.handler, "POST",
+            api_index.handler, "POST", path="/api/index.py?__route=/api/image",
             body=json.dumps({"prompt": "kedi"}).encode("utf-8"),
             headers={"Authorization": f"Bearer {v_tok}"},
         ).run()
-    check("api/image.py upstream error → 502", v_img_err.status == 502)
+    check("api/index.py /api/image upstream error → 502", v_img_err.status == 502)
+
+    v_404 = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/nope").run()
+    check("api/index.py unknown route → 404", v_404.status == 404)
 
     # ------------------------------------------------------------------
     section("8. SOZDIZIMI KONTROLLERI (PYTHON + JS + VERCEL.JSON)")
-    py_files = [str(ROOT / "server.py")] + [str(p) for p in (ROOT / "core").glob("*.py")] + [str(p) for p in (ROOT / "api").glob("*.py")]
+    py_files = (
+        [str(ROOT / "server.py")]
+        + [str(p) for p in (ROOT / "core").glob("*.py")]
+        + [str(p) for p in (ROOT / "core" / "handlers").glob("*.py")]
+        + [str(p) for p in (ROOT / "api").glob("*.py")]
+    )
     cp = subprocess.run(["python3", "-m", "py_compile", *py_files], capture_output=True, text=True)
     check("All Python files py_compile OK", cp.returncode == 0, cp.stderr[:200])
 
@@ -413,9 +425,10 @@ def main():
     check("public/index.html JS syntax valid", nc.returncode == 0, nc.stderr[:200])
 
     vj = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
-    check("vercel.json has /api/auth/:path* & <= 12 functions",
-          any(r.get("destination") == "/api/auth.py" for r in vj.get("rewrites", []))
-          and len(list((ROOT / "api").glob("*.py"))) <= 12)
+    check("vercel.json rewrites /api/:path* -> /api/index.py & single api/*.py",
+          any(r.get("source") == "/api/:path*" and str(r.get("destination", "")).startswith("/api/index.py")
+              for r in vj.get("rewrites", []))
+          and len(list((ROOT / "api").glob("*.py"))) == 1)
 
     # ------------------------------------------------------------------
     section("SUMMARY")
