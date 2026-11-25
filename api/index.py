@@ -20,6 +20,7 @@ _INDEX_PATHS = frozenset({'', '/api', '/api/index', '/api/index.py'})
 
 _EXACT_ROUTES = {
     '/api/ping': ping.handler,
+    '/api/whatsapp/keep-alive': ping.handler,
     '/api/health': health.handler,
     '/api/tts': tts.handler,
     '/api/stt': stt.handler,

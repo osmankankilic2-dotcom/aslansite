@@ -30,7 +30,14 @@ const BLOB_API_VERSION = '12';
 const BLOB_MAGIC = Buffer.from('ASLANWA1', 'ascii');
 const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
 const DEFAULT_PAIR_WINDOW_MS = Math.max(15000, Number(process.env.WA_PAIR_WINDOW_MS || 180000));
-const DEFAULT_PULSE_WINDOW_MS = Math.max(15000, Number(process.env.WA_PULSE_WINDOW_MS || 120000));
+const DEFAULT_WAKE_MAX_MS = Math.max(20000, Number(process.env.WA_WAKE_MAX_MS || 110000));
+const DEFAULT_IDLE_SLEEP_MS = Math.max(1500, Number(process.env.WA_IDLE_SLEEP_MS || 8000));
+const DEFAULT_POST_REPLY_GRACE_MS = Math.max(1500, Number(process.env.WA_POST_REPLY_GRACE_MS || 15000));
+const ACTIVE_SLEEP_MS = Math.max(15000, Number(process.env.WA_ACTIVE_SLEEP_MS || 30000));
+const IDLE_SLEEP_INTERVAL_MS = Math.max(20000, Number(process.env.WA_IDLE_SLEEP_INTERVAL_MS || 60000));
+const DEEP_SLEEP_INTERVAL_MS = Math.max(30000, Number(process.env.WA_DEEP_SLEEP_INTERVAL_MS || 60000));
+const MIN_WAKE_GAP_MS = Math.max(5000, Number(process.env.WA_MIN_WAKE_GAP_MS || 20000));
+const MAX_RECENT_MSG_IDS = 80;
 const TMP_SESSION_ROOT = process.env.WA_TMP_DIR || path.join(os.tmpdir(), 'aslan_wa_sessions');
 
 const instances = new Map();
@@ -71,6 +78,27 @@ function safeWaitUntil(promise) {
     return p;
 }
 
+function isSocketOpen(sock) {
+    const ws = sock && sock.ws;
+    return Boolean(ws && (ws.isOpen || (ws.socket && ws.socket.readyState === 1) || ws.readyState === 1));
+}
+
+function pingSocket(sock) {
+    const ws = sock && sock.ws;
+    if (!ws) return false;
+    try {
+        if (ws.socket && typeof ws.socket.ping === 'function') {
+            ws.socket.ping();
+            return true;
+        }
+        if (typeof ws.ping === 'function') {
+            ws.ping();
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
 function resolveBridgeSeed() {
     return (
         process.env.QUOTA_SIGNING_SECRET ||
@@ -88,6 +116,29 @@ function resolveBridgeToken() {
     ).trim();
     if (explicit) return explicit;
     return crypto.createHmac('sha256', resolveBridgeSeed()).update('aslan-wa-bridge-v1').digest('hex');
+}
+
+function resolveSelfWakeUrl() {
+    const parseHost = (raw) => {
+        const s = String(raw || '').trim();
+        if (!s) return '';
+        if (s.includes('://')) {
+            try {
+                return new URL(s).hostname.toLowerCase().replace(/\.$/, '');
+            } catch (_) {
+                return '';
+            }
+        }
+        return s.split('/')[0].split(':')[0].toLowerCase().replace(/\.$/, '');
+    };
+    const prod = parseHost(process.env.VERCEL_PROJECT_PRODUCTION_URL);
+    if (prod) return `https://${prod}/api/wa_bridge/wa/wake`;
+    const env = String(process.env.VERCEL_ENV || '').trim().toLowerCase();
+    const preview = parseHost(process.env.VERCEL_URL);
+    if (env !== 'production' && preview && preview.endsWith('.vercel.app')) {
+        return `https://${preview}/api/wa_bridge/wa/wake`;
+    }
+    return 'https://aslansite.vercel.app/api/wa_bridge/wa/wake';
 }
 
 function isAuthorizedRequest(request) {
@@ -178,7 +229,7 @@ async function ipv4PostJson(urlStr, payload, headers = {}, timeoutMs = 25000) {
     return { status: res.status, data: res.json, text: res.text };
 }
 
-/* ------------------------------------------------------------------ Encrypted Vercel Blob Session Store */
+/* ------------------------------------------------------------------ Encrypted Vercel Blob + /tmp Session Store */
 function blobToken() {
     return String(process.env.BLOB_READ_WRITE_TOKEN || '').trim();
 }
@@ -283,16 +334,6 @@ function deleteUserSessionFromTmp(userId) {
     } catch (_) {
         return false;
     }
-}
-
-async function loadSavedSession(userId) {
-    if (!userId || process.env.WA_MOCK_MODE === '1') return null;
-    const localSess = loadUserSessionFromTmp(userId);
-    const blobSess = blobEnabled() ? await loadUserSessionFromBlob(userId) : null;
-    if (localSess && blobSess) {
-        return Number(blobSess.updatedAt || 0) >= Number(localSess.updatedAt || 0) ? blobSess : localSess;
-    }
-    return blobSess || localSess || null;
 }
 
 async function blobList(prefix, limit = 25) {
@@ -419,6 +460,16 @@ async function loadUserSessionFromBlob(userId) {
     return null;
 }
 
+async function loadSavedSession(userId) {
+    if (!userId || process.env.WA_MOCK_MODE === '1') return null;
+    const localSess = loadUserSessionFromTmp(userId);
+    const blobSess = blobEnabled() ? await loadUserSessionFromBlob(userId) : null;
+    if (localSess && blobSess) {
+        return Number(blobSess.updatedAt || 0) >= Number(localSess.updatedAt || 0) ? blobSess : localSess;
+    }
+    return blobSess || localSess || null;
+}
+
 async function deleteUserSessionFromBlob(userId) {
     if (!blobEnabled() || !userId || process.env.WA_MOCK_MODE === '1') return false;
     const prefix = userBlobPrefix(userId);
@@ -456,9 +507,118 @@ async function listActiveBlobSessions() {
     return out;
 }
 
+async function listSavedActiveSessions() {
+    if (process.env.WA_MOCK_MODE === '1') return [];
+    const byUser = new Map();
+    if (blobEnabled()) {
+        const blobSessions = await listActiveBlobSessions();
+        for (const s of blobSessions) {
+            if (s && s.userId) byUser.set(String(s.userId), s);
+        }
+    }
+    try {
+        if (fs.existsSync(TMP_SESSION_ROOT)) {
+            const entries = fs.readdirSync(TMP_SESSION_ROOT, { withFileTypes: true });
+            for (const ent of entries) {
+                if (!ent.isDirectory()) continue;
+                const fp = path.join(TMP_SESSION_ROOT, ent.name, 'session.enc');
+                if (!fs.existsSync(fp)) continue;
+                try {
+                    const parsed = decryptSessionPayload(fs.readFileSync(fp));
+                    if (parsed && parsed.userId) {
+                        const prev = byUser.get(String(parsed.userId));
+                        if (!prev || Number(parsed.updatedAt || 0) > Number(prev.updatedAt || 0)) {
+                            byUser.set(String(parsed.userId), parsed);
+                        }
+                    }
+                } catch (_) {}
+            }
+        }
+    } catch (_) {}
+    return Array.from(byUser.values());
+}
+
+/* ------------------------------------------------------------------ Persistent Wake Lease */
+const WAKE_LEASE_TMP_PATH = path.join(TMP_SESSION_ROOT, '_sys_wake_lease.enc');
+const WAKE_LEASE_BLOB_PREFIX = 'aslan-wa/sys/wake_lease/';
+
+async function loadWakeLease() {
+    let tmpLease = null;
+    try {
+        if (fs.existsSync(WAKE_LEASE_TMP_PATH)) {
+            tmpLease = decryptSessionPayload(fs.readFileSync(WAKE_LEASE_TMP_PATH));
+        }
+    } catch (_) {}
+
+    let blobLease = null;
+    if (blobEnabled() && process.env.WA_MOCK_MODE !== '1') {
+        const blobs = await blobList(WAKE_LEASE_BLOB_PREFIX, 15);
+        const sorted = blobs
+            .filter((b) => String(b.pathname || '').startsWith(WAKE_LEASE_BLOB_PREFIX) && String(b.pathname || '').endsWith('.enc'))
+            .sort((a, b) => String(b.pathname || '').localeCompare(String(a.pathname || '')));
+        for (const b of sorted) {
+            const parsed = decryptSessionPayload(await blobFetchUrl(b.url || b.downloadUrl || ''));
+            if (parsed && typeof parsed === 'object') {
+                blobLease = parsed;
+                break;
+            }
+        }
+    }
+
+    if (tmpLease && blobLease) {
+        return Number(blobLease.updatedAt || 0) >= Number(tmpLease.updatedAt || 0) ? blobLease : tmpLease;
+    }
+    return blobLease || tmpLease || null;
+}
+
+async function saveWakeLease(lease) {
+    const payload = Object.assign({}, lease || {}, { updatedAt: Date.now() });
+    try {
+        fs.mkdirSync(path.dirname(WAKE_LEASE_TMP_PATH), { recursive: true });
+        fs.writeFileSync(WAKE_LEASE_TMP_PATH, encryptSessionPayload(payload), { mode: 0o600 });
+    } catch (_) {}
+
+    if (blobEnabled() && process.env.WA_MOCK_MODE !== '1') {
+        const ts = String(Date.now()).padStart(15, '0');
+        const rand = crypto.randomBytes(3).toString('hex');
+        const newPath = `${WAKE_LEASE_BLOB_PREFIX}v${ts}_${rand}.enc`;
+        const up = await blobPutExact(newPath, encryptSessionPayload(payload));
+        if (up) {
+            try {
+                const blobs = await blobList(WAKE_LEASE_BLOB_PREFIX, 20);
+                const stale = blobs
+                    .filter((b) => String(b.pathname || '').startsWith(WAKE_LEASE_BLOB_PREFIX) && b.pathname !== newPath && b.url)
+                    .map((b) => b.url);
+                if (stale.length) await blobDeleteUrls(stale);
+            } catch (_) {}
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ Config & Bot Message Runtime */
 function normalizePhoneDigits(rawPhone) {
     return String(rawPhone || '').replace(/\D/g, '');
+}
+
+function normalizeRecentIds(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(String).filter(Boolean).slice(-MAX_RECENT_MSG_IDS);
+}
+
+function rememberMessageId(instance, msgId) {
+    const cleanId = String(msgId || '').trim();
+    if (!cleanId) return true;
+    if (!Array.isArray(instance.recentMessageIds)) {
+        instance.recentMessageIds = [];
+    }
+    if (instance.recentMessageIds.includes(cleanId)) {
+        return false;
+    }
+    instance.recentMessageIds.push(cleanId);
+    if (instance.recentMessageIds.length > MAX_RECENT_MSG_IDS) {
+        instance.recentMessageIds = instance.recentMessageIds.slice(-MAX_RECENT_MSG_IDS);
+    }
+    return true;
 }
 
 function defaultConfig(raw) {
@@ -637,26 +797,120 @@ function computeHumanDelayMs(seconds) {
     return Math.round(base * factor);
 }
 
-async function handleIncomingMessage(instance, msg) {
-    const cfg = instance.config;
-    if (!cfg || !cfg.enabled) return;
-    if (!msg || !msg.key || msg.key.fromMe) return;
-
-    const remoteJid = String(msg.key.remoteJid || '');
-    if (!remoteJid || remoteJid === 'status@broadcast') return;
-
-    const isGroup = remoteJid.endsWith('@g.us');
-    if (isGroup && !cfg.allow_groups) return;
-    if (!isGroup && !cfg.allow_private) return;
-
-    const text = extractMessageText(msg);
-    if (!text) return;
-    const textLower = text.toLowerCase();
-
-    if (matchesKeywordList(textLower, cfg.ignored_keywords)) {
-        return;
+async function evaluateIncomingMessage(instance, opts = {}) {
+    const cfg = instance && instance.config;
+    if (!cfg || !cfg.enabled) {
+        return { skipped: true, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'disabled' };
     }
 
+    const msgId = String(opts.msgId || '').trim();
+    if (msgId && !rememberMessageId(instance, msgId)) {
+        return { skipped: true, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'duplicate' };
+    }
+
+    const isGroup = Boolean(opts.isGroup);
+    if (isGroup && !cfg.allow_groups) {
+        return { skipped: false, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'group_blocked' };
+    }
+    if (!isGroup && !cfg.allow_private) {
+        return { skipped: false, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'private_blocked' };
+    }
+
+    const cleanText = String(opts.text || '').trim();
+    if (!cleanText) {
+        return { skipped: false, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'empty' };
+    }
+    const textLower = cleanText.toLowerCase();
+
+    if (matchesKeywordList(textLower, cfg.ignored_keywords)) {
+        return { skipped: false, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'ignored_keyword' };
+    }
+
+    const isMentioned = Boolean(opts.isMentioned);
+    const ruleReply = matchRuleReply(textLower, cfg.rules);
+    const hasTriggerMatch = cfg.trigger_keywords.length === 0 || matchesKeywordList(textLower, cfg.trigger_keywords);
+
+    if (isGroup && cfg.group_mode === 'mentions_or_triggers') {
+        if (!isMentioned && !ruleReply && !(cfg.trigger_keywords.length > 0 && hasTriggerMatch)) {
+            return { skipped: false, replied: false, replyText: '', emoji: '', delayMs: 0, reason: 'group_not_triggered' };
+        }
+    }
+
+    const emoji = findAutoReaction(textLower, cfg.auto_reactions);
+
+    if (!ruleReply && cfg.trigger_keywords.length > 0 && !hasTriggerMatch) {
+        return { skipped: false, replied: false, replyText: '', emoji: emoji || '', delayMs: 0, reason: 'no_trigger' };
+    }
+
+    let replyText = ruleReply;
+    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && cfg.custom_ai.api_key) {
+        replyText = await callCustomAi(cfg.custom_ai, cleanText, cfg);
+    }
+    if (!replyText && cfg.default_reply) {
+        replyText = cfg.default_reply;
+    }
+
+    const delayMs = replyText ? computeHumanDelayMs(cfg.typing_delay_seconds) : 0;
+    return {
+        skipped: false,
+        replied: Boolean(replyText),
+        replyText: replyText || '',
+        emoji: emoji || '',
+        delayMs,
+    };
+}
+
+function lightweightPreFilterMessage(instance, msg) {
+    const cfg = instance && instance.config;
+    if (!cfg || !cfg.enabled) return false;
+    if (!msg || !msg.key || msg.key.fromMe) return false;
+    const remoteJid = String(msg.key.remoteJid || '');
+    if (!remoteJid || remoteJid === 'status@broadcast') return false;
+    const msgId = String(msg.key.id || '').trim();
+    if (msgId && Array.isArray(instance.recentMessageIds) && instance.recentMessageIds.includes(msgId)) {
+        return false;
+    }
+    const text = extractMessageText(msg);
+    if (!text) return false;
+    const isGroup = remoteJid.endsWith('@g.us');
+    if (isGroup && !cfg.allow_groups) return false;
+    if (!isGroup && !cfg.allow_private) return false;
+    if (matchesKeywordList(text.toLowerCase(), cfg.ignored_keywords)) {
+        return false;
+    }
+    return true;
+}
+
+async function wakeAndProcessMessage(instance, msg) {
+    instance.sleepState = 'awake';
+    instance.lastWakeAt = Date.now();
+    if (process.env.WA_MOCK_MODE !== '1' && instance.userId) {
+        try {
+            const remote = await loadSavedSession(instance.userId);
+            if (remote && remote.config && Number(remote.updatedAt || 0) > Number(instance.updatedAt || 0)) {
+                instance.config = defaultConfig(remote.config);
+                instance.updatedAt = Number(remote.updatedAt);
+            }
+        } catch (_) {}
+    }
+    return handleIncomingMessage(instance, msg);
+}
+
+async function handleIncomingMessage(instance, msg) {
+    if (!msg || !msg.key || msg.key.fromMe) {
+        return { skipped: true, replied: false };
+    }
+    const remoteJid = String(msg.key.remoteJid || '');
+    if (!remoteJid || remoteJid === 'status@broadcast') {
+        return { skipped: true, replied: false };
+    }
+
+    const text = extractMessageText(msg);
+    if (!text) {
+        return { skipped: false, replied: false };
+    }
+
+    const isGroup = remoteJid.endsWith('@g.us');
     const mentionedJids = (
         msg.message &&
         msg.message.extendedTextMessage &&
@@ -667,48 +921,39 @@ async function handleIncomingMessage(instance, msg) {
     const selfJid = selfRawId ? `${selfRawId}@s.whatsapp.net` : '';
     const isMentioned = Boolean(selfJid && Array.isArray(mentionedJids) && mentionedJids.includes(selfJid));
 
-    const ruleReply = matchRuleReply(textLower, cfg.rules);
-    const hasTriggerMatch = cfg.trigger_keywords.length === 0 || matchesKeywordList(textLower, cfg.trigger_keywords);
+    const res = await evaluateIncomingMessage(instance, {
+        text,
+        isGroup,
+        isMentioned,
+        msgId: msg.key.id || '',
+    });
+    if (res.skipped) return res;
 
-    if (isGroup && cfg.group_mode === 'mentions_or_triggers') {
-        if (!isMentioned && !ruleReply && !(cfg.trigger_keywords.length > 0 && hasTriggerMatch)) {
-            return;
-        }
-    }
-
-    const emoji = findAutoReaction(textLower, cfg.auto_reactions);
-    if (emoji && instance.sock) {
+    if (res.emoji && instance.sock) {
         try {
-            await instance.sock.sendMessage(remoteJid, { react: { text: emoji, key: msg.key } });
+            await instance.sock.sendMessage(remoteJid, { react: { text: res.emoji, key: msg.key } });
         } catch (_) {}
     }
 
-    if (!ruleReply && cfg.trigger_keywords.length > 0 && !hasTriggerMatch) {
-        return;
+    if (!res.replied || !res.replyText || !instance.sock) {
+        return res;
     }
-
-    let replyText = ruleReply;
-    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && cfg.custom_ai.api_key) {
-        replyText = await callCustomAi(cfg.custom_ai, text, cfg);
-    }
-    if (!replyText && cfg.default_reply) {
-        replyText = cfg.default_reply;
-    }
-    if (!replyText || !instance.sock) return;
 
     try {
-        if (cfg.show_typing) {
+        if (instance.config && instance.config.show_typing) {
             await instance.sock.sendPresenceUpdate('composing', remoteJid);
         }
-        const delayMs = computeHumanDelayMs(cfg.typing_delay_seconds);
-        if (delayMs > 0) {
-            await sleep(delayMs);
+        if (res.delayMs > 0) {
+            await sleep(res.delayMs);
         }
-        if (cfg.show_typing) {
+        if (instance.config && instance.config.show_typing) {
             await instance.sock.sendPresenceUpdate('paused', remoteJid);
         }
-        await instance.sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
-    } catch (_) {}
+        await instance.sock.sendMessage(remoteJid, { text: res.replyText }, { quoted: msg });
+    } catch (_) {
+        return Object.assign({}, res, { replied: false });
+    }
+    return res;
 }
 
 /* ------------------------------------------------------------------ Blob-Backed Baileys Auth State */
@@ -731,6 +976,12 @@ function createBlobAuthBox(instance, initialSession = null) {
             loggedOut: Boolean(instance.loggedOut),
             connectedAt: instance.connectedAt || null,
             lastKeepAliveAt: instance.lastKeepAliveAt || 0,
+            sleepState: instance.sleepState || (instance.connected ? 'sleeping' : 'idle'),
+            lastWakeAt: instance.lastWakeAt || 0,
+            lastMessageAt: instance.lastMessageAt || 0,
+            messagesHandled: Number(instance.messagesHandled || 0),
+            emptyWakeStreak: Number(instance.emptyWakeStreak || 0),
+            recentMessageIds: normalizeRecentIds(instance.recentMessageIds),
             reconnectCount: instance.reconnectCount || 0,
             pairingCode: instance.pairingCode || null,
             expiresAt: instance.expiresAt || null,
@@ -881,7 +1132,7 @@ function waitForPairingReady(sock, timeoutMs = 15000) {
             }
         };
         const hardTimer = setTimeout(() => {
-            if (sock && sock.ws && sock.ws.isOpen) {
+            if (isSocketOpen(sock)) {
                 finishResolve();
             } else {
                 finishReject(new Error('Bağlantı zaman aşımı'));
@@ -889,31 +1140,100 @@ function waitForPairingReady(sock, timeoutMs = 15000) {
         }, timeoutMs);
         sock.ev.on('connection.update', onUpdate);
         wsCheckTimer = setTimeout(() => {
-            if (!settled && sock && sock.ws && sock.ws.isOpen) {
+            if (!settled && isSocketOpen(sock)) {
                 finishResolve();
             }
         }, 5500);
     });
 }
 
-function runSocketLifecycleWindow(instance, initialSock, authBox, windowMs) {
+function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) {
+    const opts = typeof options === 'number'
+        ? { mode: 'wake_cycle', maxWindowMs: options }
+        : (options || {});
+    const mode = opts.mode || 'wake_cycle';
+    const maxWindowMs = Math.max(5000, Number(opts.maxWindowMs || (mode === 'pairing' ? DEFAULT_PAIR_WINDOW_MS : DEFAULT_WAKE_MAX_MS)));
+    const idleSleepMs = Math.max(1500, Number(opts.idleSleepMs || DEFAULT_IDLE_SLEEP_MS));
+    const postReplyGraceMs = Math.max(1500, Number(opts.postReplyGraceMs || DEFAULT_POST_REPLY_GRACE_MS));
+
     instance.lifecycleActive = true;
+    instance.sleepState = 'awake';
+    instance.lastWakeAt = Date.now();
+
     return new Promise((resolve) => {
         let finished = false;
         let windowClosing = false;
         let windowTimer = null;
+        let idleTimer = null;
+        let openFallbackTimer = null;
+        let inFlightMessages = 0;
+        let messagesHandledInCycle = 0;
+        let pendingFlushed = false;
+
+        const clearIdleTimers = () => {
+            if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+            if (openFallbackTimer) { clearTimeout(openFallbackTimer); openFallbackTimer = null; }
+        };
 
         const finishWindow = async () => {
             if (finished) return;
             finished = true;
             windowClosing = true;
-            if (windowTimer) clearTimeout(windowTimer);
+            if (windowTimer) { clearTimeout(windowTimer); windowTimer = null; }
+            clearIdleTimers();
+
+            if (!instance.loggedOut && !instance.stopped && instance.connected) {
+                instance.emptyWakeStreak = messagesHandledInCycle > 0
+                    ? 0
+                    : ((instance.emptyWakeStreak || 0) + 1);
+                instance.sleepState = 'sleeping';
+            } else if (instance.stopped || instance.loggedOut) {
+                instance.sleepState = 'idle';
+            }
+
             try {
                 await authBox.flush(true);
             } catch (_) {}
             closeSocketQuietly(instance);
             instance.lifecycleActive = false;
-            resolve();
+
+            if (mode === 'pairing' && instance.connected && !instance.loggedOut && !instance.stopped) {
+                if (process.env.WA_SELF_WAKE_DISABLED !== '1' && process.env.VERCEL && process.env.WA_MOCK_MODE !== '1') {
+                    safeWaitUntil(
+                        ipv4PostJson(
+                            resolveSelfWakeUrl(),
+                            { user_id: instance.userId, force: true, hop: 0 },
+                            { 'X-Worker-Token': resolveBridgeToken() },
+                            8000,
+                        ).catch(() => {})
+                    );
+                }
+            }
+
+            resolve({
+                messagesHandled: messagesHandledInCycle,
+                emptyWakeStreak: instance.emptyWakeStreak || 0,
+            });
+        };
+
+        const scheduleIdleSleep = () => {
+            if (finished || windowClosing) return;
+            if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+            if (mode === 'pairing' && !instance.connected) return;
+            if (!pendingFlushed || inFlightMessages > 0) return;
+            const waitMs = messagesHandledInCycle > 0 ? postReplyGraceMs : idleSleepMs;
+            idleTimer = setTimeout(() => {
+                if (!finished && !windowClosing && inFlightMessages === 0) {
+                    finishWindow();
+                }
+            }, waitMs);
+        };
+
+        const isRecentAppendMsg = (m) => {
+            if (!m || !m.key || m.key.fromMe) return false;
+            const rawTs = Number(m.messageTimestamp || 0);
+            if (!rawTs) return false;
+            return (rawTs * 1000) >= (Date.now() - 600000);
         };
 
         const bindSocket = (sock) => {
@@ -922,25 +1242,62 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, windowMs) {
                 authBox.flush(true).catch(() => {});
             });
             sock.ev.on('messages.upsert', (ev) => {
-                if (!ev || ev.type !== 'notify' || !Array.isArray(ev.messages)) return;
+                if (!ev || !Array.isArray(ev.messages)) return;
+                const isNotify = ev.type === 'notify';
+                const isAppend = ev.type === 'append';
+                if (!isNotify && !isAppend) return;
+
                 for (const m of ev.messages) {
-                    handleIncomingMessage(instance, m).catch(() => {});
+                    if (isAppend && !isRecentAppendMsg(m)) continue;
+                    if (!lightweightPreFilterMessage(instance, m)) continue;
+                    inFlightMessages++;
+                    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+                    wakeAndProcessMessage(instance, m)
+                        .then((res) => {
+                            if (res && res.replied) {
+                                messagesHandledInCycle++;
+                                instance.messagesHandled = (instance.messagesHandled || 0) + 1;
+                                instance.lastMessageAt = Date.now();
+                                instance.emptyWakeStreak = 0;
+                            }
+                        })
+                        .catch(() => {})
+                        .finally(() => {
+                            inFlightMessages = Math.max(0, inFlightMessages - 1);
+                            if (inFlightMessages === 0) {
+                                scheduleIdleSleep();
+                            }
+                        });
                 }
             });
             sock.ev.on('connection.update', (update) => {
                 if (!update || finished || windowClosing || instance.stopped) return;
-                const { connection, lastDisconnect } = update;
+                const { connection, lastDisconnect, receivedPendingNotifications } = update;
                 if (connection === 'open') {
                     instance.status = 'connected';
                     instance.connected = true;
                     instance.loggedOut = false;
                     instance.reconnecting = false;
+                    instance.sleepState = 'awake';
                     instance.connectedAt = instance.connectedAt || Date.now();
                     instance.lastKeepAliveAt = Date.now();
                     instance.pairingCode = null;
                     instance.updatedAt = Date.now();
                     authBox.flush(true).catch(() => {});
-                } else if (connection === 'close') {
+                    if (!pendingFlushed && !openFallbackTimer) {
+                        openFallbackTimer = setTimeout(() => {
+                            openFallbackTimer = null;
+                            pendingFlushed = true;
+                            scheduleIdleSleep();
+                        }, 8000);
+                    }
+                }
+                if (receivedPendingNotifications === true) {
+                    pendingFlushed = true;
+                    if (openFallbackTimer) { clearTimeout(openFallbackTimer); openFallbackTimer = null; }
+                    scheduleIdleSleep();
+                }
+                if (connection === 'close') {
                     const code = lastDisconnect && lastDisconnect.error
                         ? new Boom(lastDisconnect.error).output?.statusCode
                         : 0;
@@ -949,6 +1306,7 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, windowMs) {
                         instance.connected = false;
                         instance.loggedOut = true;
                         instance.status = 'disconnected';
+                        instance.sleepState = 'idle';
                         instance.updatedAt = Date.now();
                         finishWindow();
                         return;
@@ -990,7 +1348,7 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, windowMs) {
 
         windowTimer = setTimeout(() => {
             finishWindow();
-        }, windowMs);
+        }, maxWindowMs);
 
         if (initialSock) {
             bindSocket(initialSock);
@@ -1014,6 +1372,12 @@ function makeBaseInstance(userId, phone = '', configInput = {}, existing = null)
         reconnecting: false,
         connectedAt: base.connectedAt || null,
         lastKeepAliveAt: base.lastKeepAliveAt || 0,
+        sleepState: base.sleepState || (base.connected ? 'sleeping' : 'idle'),
+        lastWakeAt: base.lastWakeAt || 0,
+        lastMessageAt: base.lastMessageAt || 0,
+        messagesHandled: Number(base.messagesHandled || 0),
+        emptyWakeStreak: Number(base.emptyWakeStreak || 0),
+        recentMessageIds: normalizeRecentIds(base.recentMessageIds),
         reconnectCount: base.reconnectCount || 0,
         pairingCode: base.pairingCode || null,
         expiresAt: base.expiresAt || null,
@@ -1037,6 +1401,10 @@ function formatStatusResponse(inst) {
             connected_at: null,
             pairing_code_active: false,
             enabled: false,
+            sleep_state: 'idle',
+            last_wake_at: null,
+            last_message_at: null,
+            messages_handled: 0,
             config_updates_count: 0,
             reconnect_count: 0,
             config_summary: null,
@@ -1050,6 +1418,10 @@ function formatStatusResponse(inst) {
         connected_at: inst.connectedAt || null,
         pairing_code_active: pairActive,
         enabled: Boolean(inst.config && inst.config.enabled),
+        sleep_state: inst.sleepState || (inst.connected ? 'sleeping' : 'idle'),
+        last_wake_at: inst.lastWakeAt || null,
+        last_message_at: inst.lastMessageAt || null,
+        messages_handled: Number(inst.messagesHandled || 0),
         config_updates_count: inst.configUpdatesCount || 0,
         reconnect_count: inst.reconnectCount || 0,
         config_summary: sanitizeConfigSummary(inst.config),
@@ -1074,6 +1446,8 @@ async function startPairing(userId, phone, configInput = {}) {
 
     const instance = makeBaseInstance(cleanUid, digits, configInput, null);
     instance.status = 'pairing';
+    instance.sleepState = 'awake';
+    instance.lastWakeAt = Date.now();
     instance.expiresAt = Date.now() + 60000;
     instances.set(cleanUid, instance);
 
@@ -1112,7 +1486,7 @@ async function startPairing(userId, phone, configInput = {}) {
             instance.connectedAt = Date.now();
             instance.pairingCode = null;
             await authBox.flush(true);
-            safeWaitUntil(runSocketLifecycleWindow(instance, sock, authBox, DEFAULT_PULSE_WINDOW_MS));
+            safeWaitUntil(runSocketLifecycleWindow(instance, sock, authBox, { mode: 'wake_cycle' }));
             return {
                 success: true,
                 already_connected: true,
@@ -1127,7 +1501,7 @@ async function startPairing(userId, phone, configInput = {}) {
         }
         instance.pairingCode = cleanCode;
         await authBox.flush(true);
-        safeWaitUntil(runSocketLifecycleWindow(instance, sock, authBox, DEFAULT_PAIR_WINDOW_MS));
+        safeWaitUntil(runSocketLifecycleWindow(instance, sock, authBox, { mode: 'pairing' }));
         return {
             success: true,
             pairing_code: cleanCode,
@@ -1139,6 +1513,7 @@ async function startPairing(userId, phone, configInput = {}) {
         instance.stopped = true;
         closeSocketQuietly(instance);
         instance.status = 'error';
+        instance.sleepState = 'idle';
         return {
             success: false,
             error: 'Aslan AI WhatsApp eşleştirme kodu şu an oluşturulamadı. Lütfen birkaç saniye sonra tekrar deneyin.',
@@ -1169,6 +1544,12 @@ async function getStatus(userId) {
                 connected: Boolean(remote.connected),
                 loggedOut: Boolean(remote.loggedOut),
                 connectedAt: remote.connectedAt || warm.connectedAt,
+                sleepState: warm.lifecycleActive ? 'awake' : (remote.sleepState || warm.sleepState),
+                lastWakeAt: Math.max(warm.lastWakeAt || 0, remote.lastWakeAt || 0),
+                lastMessageAt: Math.max(warm.lastMessageAt || 0, remote.lastMessageAt || 0),
+                messagesHandled: Math.max(warm.messagesHandled || 0, remote.messagesHandled || 0),
+                emptyWakeStreak: Number(remote.emptyWakeStreak ?? warm.emptyWakeStreak ?? 0),
+                recentMessageIds: normalizeRecentIds(remote.recentMessageIds || warm.recentMessageIds),
                 pairingCode: remote.pairingCode ?? warm.pairingCode,
                 expiresAt: remote.expiresAt ?? warm.expiresAt,
                 reconnectCount: Math.max(warm.reconnectCount || 0, remote.reconnectCount || 0),
@@ -1227,12 +1608,7 @@ async function updateConfig(userId, newConfig) {
         !inst.stopped &&
         !inst.lifecycleActive
     ) {
-        const sessionData = remote || (inst.authBox ? { creds: inst.authBox.creds, keys: inst.authBox.keyStore } : null);
-        if (sessionData && sessionData.creds && sessionData.creds.registered) {
-            const box = createBlobAuthBox(inst, sessionData);
-            inst.authBox = box;
-            safeWaitUntil(runSocketLifecycleWindow(inst, null, box, DEFAULT_PULSE_WINDOW_MS));
-        }
+        safeWaitUntil(runAutoWakeCycle({ targetUserId: cleanUid, force: true }));
     }
 
     return {
@@ -1261,6 +1637,7 @@ async function stopBot(userId, logout = false) {
     inst.stopped = true;
     inst.connected = false;
     inst.status = 'stopped';
+    inst.sleepState = 'idle';
     if (inst.config) inst.config.enabled = false;
     if (logout && inst.sock && typeof inst.sock.logout === 'function') {
         try { await inst.sock.logout(); } catch (_) {}
@@ -1286,12 +1663,19 @@ function mockConnect(userId) {
     const cleanUid = String(userId || '').trim();
     let inst = instances.get(cleanUid);
     if (!inst) {
-        inst = makeBaseInstance(cleanUid, '', {}, { status: 'connected', connected: true, connectedAt: Date.now(), lastKeepAliveAt: Date.now() });
+        inst = makeBaseInstance(cleanUid, '', {}, {
+            status: 'connected',
+            connected: true,
+            sleepState: 'sleeping',
+            connectedAt: Date.now(),
+            lastKeepAliveAt: Date.now(),
+        });
         instances.set(cleanUid, inst);
     } else {
         inst.status = 'connected';
         inst.connected = true;
         inst.loggedOut = false;
+        inst.sleepState = 'sleeping';
         inst.connectedAt = Date.now();
         inst.lastKeepAliveAt = Date.now();
         inst.pairingCode = null;
@@ -1311,56 +1695,123 @@ function mockDisconnect(userId) {
     }
     inst.status = 'disconnected';
     inst.connected = false;
+    inst.sleepState = 'sleeping';
     inst.updatedAt = Date.now();
     return formatStatusResponse(inst);
 }
 
-async function pulseActiveBlobBots() {
+async function mockIncoming(userId, payload = {}) {
+    if (process.env.WA_MOCK_MODE !== '1') {
+        return { success: false, error: 'Devre dışı.' };
+    }
+    const cleanUid = String(userId || '').trim();
+    const inst = instances.get(cleanUid);
+    if (!inst || !inst.connected) {
+        return { success: false, error: 'Bağlı oturum bulunamadı.' };
+    }
+    inst.sleepState = 'awake';
+    inst.lastWakeAt = Date.now();
+    const evalRes = await evaluateIncomingMessage(inst, {
+        text: payload.text || '',
+        isGroup: Boolean(payload.is_group),
+        isMentioned: Boolean(payload.is_mentioned),
+        msgId: payload.msg_id || '',
+    });
+    if (evalRes.replied) {
+        inst.messagesHandled = (inst.messagesHandled || 0) + 1;
+        inst.lastMessageAt = Date.now();
+        inst.emptyWakeStreak = 0;
+    }
+    inst.sleepState = 'sleeping';
+    inst.updatedAt = Date.now();
+    return Object.assign({
+        success: true,
+        woken: true,
+        sleep_state: inst.sleepState,
+        messages_handled: inst.messagesHandled || 0,
+    }, evalRes);
+}
+
+async function runAutoWakeCycle(options = {}) {
+    const cycleStartMs = Date.now();
+    const targetUserId = String(options.targetUserId || '').trim();
+    const force = Boolean(options.force);
+    const chainToken = String(options.chainToken || '').trim();
+    const hop = Number(options.hop || 0);
+
     let checked = 0;
     let alive = 0;
     let reconnected = 0;
 
-    for (const inst of instances.values()) {
-        if (!inst || inst.stopped || inst.loggedOut || inst.status === 'idle') continue;
-        checked++;
-        if (process.env.WA_MOCK_MODE === '1') {
+    if (process.env.WA_MOCK_MODE === '1') {
+        for (const inst of instances.values()) {
+            if (!inst || inst.stopped || inst.loggedOut || inst.status === 'idle') continue;
+            checked++;
             if (inst.status === 'disconnected') {
                 inst.status = 'connected';
                 inst.connected = true;
-                inst.connectedAt = Date.now();
+                inst.sleepState = 'sleeping';
+                inst.connectedAt = inst.connectedAt || Date.now();
                 inst.lastKeepAliveAt = Date.now();
+                inst.lastWakeAt = Date.now();
                 inst.reconnectCount = (inst.reconnectCount || 0) + 1;
                 reconnected++;
             } else if (inst.connected) {
                 inst.lastKeepAliveAt = Date.now();
+                inst.lastWakeAt = Date.now();
                 alive++;
             }
-            continue;
         }
-        const ws = inst.sock && inst.sock.ws;
-        if (ws && ws.readyState === 1) {
-            try {
-                if (typeof ws.ping === 'function') ws.ping();
-            } catch (_) {}
-            inst.lastKeepAliveAt = Date.now();
-            alive++;
+        return { checked, alive, reconnected, selfWakeScheduled: false };
+    }
+
+    const existingLease = await loadWakeLease();
+    if (!force) {
+        if (chainToken && existingLease && existingLease.activeToken && existingLease.activeToken !== chainToken) {
+            return { checked: 0, alive: 0, reconnected: 0, skipped: 'stale_chain' };
+        }
+        if (!chainToken && existingLease && existingLease.lastWakeAt && (Date.now() - existingLease.lastWakeAt) < MIN_WAKE_GAP_MS) {
+            return { checked: 0, alive: 0, reconnected: 0, skipped: 'min_gap' };
         }
     }
 
-    if (process.env.WA_MOCK_MODE === '1' || !blobEnabled()) {
-        return { checked, alive, reconnected };
+    const cycleToken = crypto.randomBytes(8).toString('hex');
+    await saveWakeLease({
+        activeToken: cycleToken,
+        lastWakeAt: Date.now(),
+        nextDueAt: 0,
+        hop,
+    });
+
+    const allSessions = await listSavedActiveSessions();
+    const activeSessions = allSessions.filter((sess) => (
+        sess &&
+        sess.userId &&
+        !sess.loggedOut &&
+        !sess.stopped &&
+        Boolean(sess.connected) &&
+        !(sess.config && sess.config.enabled === false) &&
+        Boolean(sess.creds && sess.creds.registered)
+    ));
+
+    if (!activeSessions.length) {
+        return { checked: 0, alive: 0, reconnected: 0, sleeping: true, selfWakeScheduled: false };
     }
 
-    const sessions = await listActiveBlobSessions();
+    const targetSessions = targetUserId
+        ? activeSessions.filter((s) => String(s.userId) === targetUserId)
+        : activeSessions;
+
     const jobs = [];
-    for (const sess of sessions) {
-        if (!sess || !sess.userId || sess.loggedOut || sess.stopped) continue;
-        if (!sess.connected || (sess.config && sess.config.enabled === false)) continue;
-        if (!sess.creds || !sess.creds.registered) continue;
-
+    for (const sess of targetSessions) {
         const uid = String(sess.userId);
+        checked++;
         let inst = instances.get(uid);
-        if (inst && (inst.lifecycleActive || (inst.sock && inst.sock.ws && inst.sock.ws.readyState === 1))) {
+        if (inst && (inst.lifecycleActive || isSocketOpen(inst.sock))) {
+            pingSocket(inst.sock);
+            inst.lastKeepAliveAt = Date.now();
+            inst.lastWakeAt = Date.now();
+            alive++;
             continue;
         }
         inst = makeBaseInstance(uid, sess.phone, sess.config, sess);
@@ -1369,13 +1820,62 @@ async function pulseActiveBlobBots() {
         inst.authBox = authBox;
         instances.set(uid, inst);
         reconnected++;
-        jobs.push(runSocketLifecycleWindow(inst, null, authBox, DEFAULT_PULSE_WINDOW_MS));
+        jobs.push(runSocketLifecycleWindow(inst, null, authBox, { mode: 'wake_cycle' }));
     }
 
+    let totalHandled = 0;
+    let minEmptyStreak = 0;
     if (jobs.length) {
-        await Promise.allSettled(jobs);
+        const settled = await Promise.allSettled(jobs);
+        const streaks = [];
+        for (const r of settled) {
+            if (r.status === 'fulfilled' && r.value) {
+                totalHandled += Number(r.value.messagesHandled || 0);
+                streaks.push(Number(r.value.emptyWakeStreak || 0));
+            }
+        }
+        if (streaks.length) {
+            minEmptyStreak = Math.min(...streaks);
+        }
     }
-    return { checked, alive, reconnected };
+
+    let selfWakeScheduled = false;
+    if (process.env.WA_SELF_WAKE_DISABLED !== '1' && process.env.VERCEL) {
+        const remainingCheck = await listSavedActiveSessions();
+        const stillHasActive = remainingCheck.some((s) => (
+            s && s.userId && !s.loggedOut && !s.stopped &&
+            Boolean(s.connected) && !(s.config && s.config.enabled === false) &&
+            Boolean(s.creds && s.creds.registered)
+        ));
+        if (stillHasActive) {
+            let desiredSleepMs = totalHandled > 0
+                ? ACTIVE_SLEEP_MS
+                : (minEmptyStreak <= 6 ? IDLE_SLEEP_INTERVAL_MS : DEEP_SLEEP_INTERVAL_MS);
+            const elapsed = Date.now() - cycleStartMs;
+            const maxSleepBudget = Math.max(2000, 240000 - elapsed);
+            const sleepMs = Math.min(desiredSleepMs, maxSleepBudget);
+            const nextToken = crypto.randomBytes(8).toString('hex');
+            await saveWakeLease({
+                activeToken: nextToken,
+                lastWakeAt: Date.now(),
+                nextDueAt: Date.now() + sleepMs,
+                hop: hop + 1,
+            });
+            selfWakeScheduled = true;
+            await sleep(sleepMs);
+            const latest = await loadWakeLease();
+            if (!latest || !latest.activeToken || latest.activeToken === nextToken) {
+                await ipv4PostJson(
+                    resolveSelfWakeUrl(),
+                    { chain_token: nextToken, hop: hop + 1 },
+                    { 'X-Worker-Token': resolveBridgeToken() },
+                    10000,
+                ).catch(() => {});
+            }
+        }
+    }
+
+    return { checked, alive, reconnected, messagesHandled: totalHandled, selfWakeScheduled };
 }
 
 /* ------------------------------------------------------------------ Vercel Node.js 24 Fetch Handler */
@@ -1390,12 +1890,14 @@ function resolveSubRoute(url, bodyAction = '') {
         const map = {
             health: '/health',
             ping: '/ping',
+            wake: '/wa/wake',
             status: '/wa/status',
             pair: '/wa/pair',
             config: '/wa/config',
             stop: '/wa/stop',
             'mock-connect': '/wa/mock-connect',
             'mock-disconnect': '/wa/mock-disconnect',
+            'mock-incoming': '/wa/mock-incoming',
         };
         if (map[bodyAction]) return map[bodyAction];
     }
@@ -1418,7 +1920,7 @@ export default {
                     return jsonResponse(200, { status: 'ok', ipv4: true, ready: true, mode: 'vercel-bridge' });
                 }
                 if (route === '/ping') {
-                    safeWaitUntil(pulseActiveBlobBots());
+                    safeWaitUntil(runAutoWakeCycle({ force: false }));
                     if (method === 'HEAD') {
                         return new Response(null, {
                             status: 200,
@@ -1430,6 +1932,11 @@ export default {
                         });
                     }
                     return jsonResponse(200, { ok: true, ts: Math.floor(Date.now() / 1000) });
+                }
+                if (route === '/wa/wake') {
+                    const uid = url.searchParams.get('user_id') || '';
+                    safeWaitUntil(runAutoWakeCycle({ targetUserId: uid, force: false }));
+                    return jsonResponse(200, { ok: true, awake: true, sleep_wake: true, ts: Math.floor(Date.now() / 1000) });
                 }
                 if (route === '/wa/status') {
                     const uid = url.searchParams.get('user_id') || '';
@@ -1453,8 +1960,18 @@ export default {
 
                 const route = resolveSubRoute(url, String(body.action || '').trim().toLowerCase());
                 if (route === '/ping') {
-                    safeWaitUntil(pulseActiveBlobBots());
+                    safeWaitUntil(runAutoWakeCycle({ force: false }));
                     return jsonResponse(200, { ok: true, ts: Math.floor(Date.now() / 1000) });
+                }
+                if (route === '/wa/wake') {
+                    const force = body.force !== undefined ? Boolean(body.force) : !body.chain_token;
+                    safeWaitUntil(runAutoWakeCycle({
+                        targetUserId: body.user_id || '',
+                        force,
+                        chainToken: String(body.chain_token || ''),
+                        hop: Number(body.hop || 0),
+                    }));
+                    return jsonResponse(200, { ok: true, awake: true, sleep_wake: true, ts: Math.floor(Date.now() / 1000) });
                 }
                 if (route === '/wa/status') {
                     const uid = body.user_id || url.searchParams.get('user_id') || '';
@@ -1478,6 +1995,10 @@ export default {
                 }
                 if (route === '/wa/mock-disconnect' && process.env.WA_MOCK_MODE === '1') {
                     const res = mockDisconnect(body.user_id);
+                    return jsonResponse(res.success ? 200 : 400, res);
+                }
+                if (route === '/wa/mock-incoming' && process.env.WA_MOCK_MODE === '1') {
+                    const res = await mockIncoming(body.user_id, body);
                     return jsonResponse(res.success ? 200 : 400, res);
                 }
                 return jsonResponse(404, { success: false, error: 'Bilinmeyen yol.' });

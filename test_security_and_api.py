@@ -1162,6 +1162,75 @@ def main():
                 break
         check("Step 4 flexible confirmations (izin veriyorum/evet/tamam/kabul ediyorum/onaylıyorum) generate 8-char code (total 1 credit)",
               flex_ok, flex_bad)
+
+        # 12.11 Serverless wake-on-message, idle sleep, Baileys ws.isOpen/socket.ping & single-chain auto-wake
+        check("Bridge & runtime use WebSocketClient ws.isOpen/socket.ping, wake lease, receivedPendingNotifications & adaptive sleep",
+              "ws.isOpen" in wa_bridge_src and "ws.socket.ping" in wa_bridge_src
+              and "ws.isOpen" in wa_rt_check_src and "ws.socket.ping" in wa_rt_check_src
+              and "wake_lease" in wa_bridge_src and "receivedPendingNotifications" in wa_bridge_src
+              and all(k in wa_bridge_src for k in (
+                  "WA_ACTIVE_SLEEP_MS", "WA_IDLE_SLEEP_INTERVAL_MS", "WA_DEEP_SLEEP_INTERVAL_MS",
+                  "evalRes", "evaluateIncomingMessage", "recentMessageIds",
+              )))
+
+        wake_script = (
+            "import bridge from './api/wa_bridge.mjs';\n"
+            "const tok = process.env.TEST_BRIDGE_TOK;\n"
+            "const unauthW = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/wake', { method: 'POST', body: '{}' }));\n"
+            "const authW = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/wake', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', force: true }) }));\n"
+            "const authWj = await authW.json();\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/pair', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', phone: '905551112233', config: {} }) }));\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-connect', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser' }) }));\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/config', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', config: { allow_groups: false, allow_private: true, rules: [{ trigger: 'fiyat', response: 'Güncel fiyat 500 TL', match_type: 'contains' }], auto_reactions: [{ trigger: 'teşekkür', emoji: '❤️' }] } }) }));\n"
+            "const inc1 = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-incoming', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', text: 'fiyat nedir, teşekkürler', msg_id: 'm1', is_group: false }) }));\n"
+            "const inc1j = await inc1.json();\n"
+            "const dup1 = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-incoming', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', text: 'fiyat nedir, teşekkürler', msg_id: 'm1', is_group: false }) }));\n"
+            "const dup1j = await dup1.json();\n"
+            "const grp2 = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-incoming', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'wakeuser', text: 'fiyat nedir', msg_id: 'm2', is_group: true }) }));\n"
+            "const grp2j = await grp2.json();\n"
+            "const stEnd = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/status?user_id=wakeuser', { headers: { 'x-worker-token': tok } }));\n"
+            "const stEndj = await stEnd.json();\n"
+            "console.log(JSON.stringify({ unauthW: unauthW.status, authW: authW.status, authWj, inc1j, dup1j, grp2j, stEndj }));\n"
+        )
+        w_run = subprocess.run(
+            ["node", "--input-type=module", "-e", wake_script],
+            cwd=str(ROOT), env=b_env, capture_output=True, text=True,
+        )
+        w_out = {}
+        if w_run.returncode == 0 and w_run.stdout.strip():
+            try:
+                w_out = json.loads(w_run.stdout.strip().splitlines()[-1])
+            except Exception:
+                w_out = {}
+        inc1j = w_out.get("inc1j") or {}
+        dup1j = w_out.get("dup1j") or {}
+        grp2j = w_out.get("grp2j") or {}
+        st_end = w_out.get("stEndj") or {}
+        check("Wake-on-message processes rules/emoji, sleeps, deduplicates & enforces group filter",
+              w_run.returncode == 0
+              and w_out.get("unauthW") == 401
+              and w_out.get("authW") == 200 and (w_out.get("authWj") or {}).get("sleep_wake") is True
+              and inc1j.get("woken") is True and inc1j.get("replied") is True
+              and inc1j.get("replyText") == "Güncel fiyat 500 TL"
+              and inc1j.get("emoji") == "❤️"
+              and inc1j.get("sleep_state") == "sleeping"
+              and inc1j.get("messages_handled") == 1
+              and dup1j.get("skipped") is True and dup1j.get("reason") == "duplicate"
+              and grp2j.get("replied") is False
+              and st_end.get("sleep_state") == "sleeping"
+              and st_end.get("messages_handled") == 1,
+              (w_run.stdout + w_run.stderr)[:260])
+
+        unauth_w = client.post("/api/wa/wake", json={})
+        auth_w_flask = client.post("/api/wa/wake", json={}, headers=hp_hdrs)
+        auth_w_vercel = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/wa/wake",
+            body=b"{}", headers=hp_hdrs,
+        ).run()
+        check("POST /api/wa/wake enforces 401 unauth & succeeds 200 on Flask & Vercel",
+              unauth_w.status_code == 401
+              and auth_w_flask.status_code == 200 and (auth_w_flask.get_json() or {}).get("awake") is True
+              and auth_w_vercel.status == 200 and auth_w_vercel.json().get("awake") is True)
     finally:
         if old_wa_url is None:
             os.environ.pop("WA_BOT_WORKER_URL", None)
@@ -1206,6 +1275,32 @@ def main():
           v_ping_get.status == 200 and v_ping_get.json().get("ok") is True
           and "no-store" in v_ping_hdrs.get("cache-control", "")
           and v_ping_head.status == 200)
+
+    r_ka_get = client.get("/api/whatsapp/keep-alive", headers=pq_hdrs)
+    r_ka_head = client.head("/api/whatsapp/keep-alive")
+    r_ka_post = client.post("/api/whatsapp/keep-alive")
+    v_ka_get = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/whatsapp/keep-alive").run()
+    v_ka_head = FakeHandler(api_index.handler, "HEAD", path="/api/index.py?__route=/api/whatsapp/keep-alive").run()
+    v_ka_post = FakeHandler(api_index.handler, "POST", path="/api/index.py?__route=/api/whatsapp/keep-alive", body=b"{}").run()
+    v_ka_hdrs = {k.lower(): v[-1] for k, v in v_ka_get.header_map().items()}
+    r_pq_ka_after = client.get("/api/quota", headers=pq_hdrs).get_json() or {}
+    check("Flask & Vercel GET/HEAD/POST /api/whatsapp/keep-alive → 200 + no-store + 0 quota",
+          r_ka_get.status_code == 200 and (r_ka_get.get_json() or {}).get("ok") is True
+          and r_ka_head.status_code == 200
+          and r_ka_post.status_code == 200 and (r_ka_post.get_json() or {}).get("ok") is True
+          and "no-store" in (r_ka_get.headers.get("Cache-Control") or "")
+          and v_ka_get.status == 200 and v_ka_get.json().get("ok") is True
+          and v_ka_head.status == 200
+          and v_ka_post.status == 200 and v_ka_post.json().get("ok") is True
+          and "no-store" in v_ka_hdrs.get("cache-control", "")
+          and r_pq_ka_after.get("ai", {}).get("remaining") == 5
+          and r_pq_ka_after.get("image", {}).get("monthly_remaining") == 2)
+
+    bridge_ka_src = (ROOT / "api" / "wa_bridge.mjs").read_text(encoding="utf-8")
+    check("api/wa_bridge.mjs implements lightweightPreFilterMessage, wakeAndProcessMessage & 60s self-wake cap",
+          "function lightweightPreFilterMessage" in bridge_ka_src
+          and "async function wakeAndProcessMessage" in bridge_ka_src
+          and "WA_DEEP_SLEEP_INTERVAL_MS || 60000" in bridge_ka_src)
 
     check("vercel.json configures cron schedule on /api/ping",
           any(c.get("path") == "/api/ping" and c.get("schedule") in ("* * * * *", "0 0 * * *")

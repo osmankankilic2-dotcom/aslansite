@@ -741,6 +741,27 @@ export async function restorePersistedBots() {
     return { restored };
 }
 
+function isSocketOpen(sock) {
+    const ws = sock && sock.ws;
+    return Boolean(ws && (ws.isOpen || (ws.socket && ws.socket.readyState === 1) || ws.readyState === 1));
+}
+
+function pingSocket(sock) {
+    const ws = sock && sock.ws;
+    if (!ws) return false;
+    try {
+        if (ws.socket && typeof ws.socket.ping === 'function') {
+            ws.socket.ping();
+            return true;
+        }
+        if (typeof ws.ping === 'function') {
+            ws.ping();
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
 /**
  * Checks all non-stopped bot sockets cleanly and triggers IPv4 heartbeat/reconnect when needed.
  */
@@ -766,11 +787,8 @@ export function keepAliveActiveBots() {
                 }
                 continue;
             }
-            const ws = inst.sock && inst.sock.ws;
-            if (ws && ws.readyState === 1) {
-                if (typeof ws.ping === 'function') {
-                    ws.ping();
-                }
+            if (isSocketOpen(inst.sock)) {
+                pingSocket(inst.sock);
                 inst.lastKeepAliveAt = Date.now();
                 alive++;
             } else if (

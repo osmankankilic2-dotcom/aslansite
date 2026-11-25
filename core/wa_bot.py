@@ -432,18 +432,35 @@ def get_status_snapshot(username_lower: str) -> dict:
             if not was_connected:
                 database.save_user_wa_bot(username_lower, wa_state)
         worker_status = worker_res.get('status', wa_state.get('stage'))
+        sleep_state = worker_res.get('sleep_state') or ('sleeping' if wa_state.get('connected') else 'idle')
+        messages_handled = int(worker_res.get('messages_handled') or 0)
     else:
         worker_status = wa_state.get('stage', 'idle')
+        sleep_state = 'sleeping' if wa_state.get('connected') else 'idle'
+        messages_handled = 0
 
     return {
         'success': True,
         'connected': bool(wa_state.get('connected')),
         'status': worker_status,
         'stage': wa_state.get('stage', 'idle'),
+        'sleep_state': sleep_state,
+        'messages_handled': messages_handled,
         'setup_active': is_in_active_setup(wa_state),
         'connected_ack': bool(wa_state.get('connected_ack')),
         'notification': 'Bağlantınız başarılı' if wa_state.get('connected') else '',
         'config_summary': sanitize_config_summary(wa_state),
+    }
+
+
+def wake_user_bot(username_lower: str, force: bool = True) -> dict:
+    """Bot oturumunu uyku-uyanma dongusuyle sessizce uyandirir."""
+    res = call_wa_worker('POST', '/wa/wake', {'user_id': username_lower, 'force': bool(force)}, timeout=10)
+    return {
+        'success': bool(res.get('success', res.get('ok', False))),
+        'awake': bool(res.get('awake', res.get('ok', False))),
+        'sleep_wake': bool(res.get('sleep_wake', True)),
+        'ts': int(res.get('ts') or time.time()),
     }
 
 

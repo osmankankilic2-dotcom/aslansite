@@ -165,7 +165,8 @@ def index():
     return send_from_directory(str(PUBLIC_DIR), 'index.html')
 
 
-@app.route('/api/ping', methods=['GET', 'HEAD'])
+@app.route('/api/ping', methods=['GET', 'HEAD', 'POST'])
+@app.route('/api/whatsapp/keep-alive', methods=['GET', 'HEAD', 'POST'])
 def api_ping():
     """Kota tuketmeyen hafif uyanik tutma (keep-alive) ucu."""
     if request.method == 'HEAD':
@@ -177,6 +178,10 @@ def api_ping():
 @app.route('/api/health', methods=['GET'])
 def health():
     """Sistem saglik ve yetenek durumu."""
+    try:
+        keepalive.touch_background_workers()
+    except Exception:
+        pass
     return jsonify({
         'status': 'ok',
         'service': 'Aslan AI',
@@ -965,6 +970,19 @@ def wa_stop():
         data = request.get_json(force=True, silent=True) or {}
         res = wa_bot.stop_user_bot(user['username_lower'], logout=bool(data.get('logout')))
         return jsonify(res)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/wake', methods=['POST'])
+def wa_wake():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        res = wa_bot.wake_user_bot(user['username_lower'], force=bool(data.get('force', True)))
+        return jsonify(res), (200 if res.get('success') else 502)
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 

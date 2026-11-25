@@ -116,6 +116,11 @@ const server = http.createServer(async (req, res) => {
                 sendJson(res, 200, result);
                 return;
             }
+            if (pathname === '/wa/wake') {
+                keepAliveActiveBots();
+                sendJson(res, 200, { ok: true, awake: true, sleep_wake: true, ts: Math.floor(Date.now() / 1000) });
+                return;
+            }
             if (pathname === '/wa/mock-connect' && process.env.WA_MOCK_MODE === '1') {
                 const result = mockConnect(body.user_id);
                 sendJson(res, result.success ? 200 : 400, result);

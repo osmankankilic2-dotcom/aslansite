@@ -10,7 +10,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import ai_engine, api_utils, blob_store, media_engine
+from core import ai_engine, api_utils, blob_store, keepalive, media_engine
 
 
 class handler(BaseHTTPRequestHandler):
@@ -18,6 +18,10 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            try:
+                keepalive.touch_background_workers()
+            except Exception:
+                pass
             payload = {
                 'status': 'ok',
                 'service': 'Aslan AI',

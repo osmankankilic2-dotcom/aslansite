@@ -80,6 +80,11 @@ class handler(BaseHTTPRequestHandler):
                 res = wa_bot.stop_user_bot(uname_lower, logout=bool(data.get('logout')))
                 api_utils.send_json(self, 200, res, methods='GET, POST, OPTIONS')
                 return
+            if action == 'wake':
+                res = wa_bot.wake_user_bot(uname_lower, force=bool(data.get('force', True)))
+                api_utils.send_json(self, 200 if res.get('success') else 502, res,
+                                    methods='GET, POST, OPTIONS')
+                return
 
             api_utils.send_json(self, 404, {'error': 'Bilinmeyen WhatsApp yolu'},
                                 methods='GET, POST, OPTIONS')
