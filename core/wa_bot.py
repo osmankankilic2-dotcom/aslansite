@@ -51,8 +51,22 @@ def is_wa_related_message(message: str, wa_state: dict = None) -> bool:
             'yazıyor', 'yaziyor', 'tetikleyici', 'üslup', 'uslup',
             'cevap vermesin', 'yanıt versin', 'yanit versin', 'eşleştir', 'eslestir',
             'kod', 'oturum', 'uyan', 'durum', 'durdur', 'kapat', 'başlat', 'baslat',
+            'mesaj gönder', 'mesaj gonder', 'mesaj at', 'mesaj yaz',
+            'gruba yaz', 'gruba gönder', 'gruba gonder',
+            'sohbete yaz', 'sohbete gönder', 'sohbete gonder',
+            'numaraya yaz', 'numaraya gönder', 'numaraya gonder',
+            'kişisine yaz', 'kisisine yaz', 'kişisine gönder', 'kisisine gonder',
+            "whatsapp'tan", "wp'den", 'wp üzerinden', 'wp uzerinden',
         )
         if any(k in low for k in bot_refs):
+            return True
+        target_cues = (
+            'kişisine', 'kisisine', 'kişiye', 'kisiye',
+            'gruba', 'grubuna', 'sohbete', 'sohbetine',
+            'numaraya', 'numarasına', 'numarasina',
+        )
+        send_verbs = ('gönder', 'gonder', 'yaz', 'ilet', 'at', 'mesaj')
+        if any(tc in low for tc in target_cues) and any(sv in low for sv in send_verbs):
             return True
     return False
 
@@ -119,11 +133,17 @@ def build_ai_context(username_lower: str, message: str = '') -> str:
     wa_q = q_snap.get('wa_bot') or {'limit': cfg.WA_BOT_QUOTA_LIMIT, 'used': 0, 'remaining': cfg.WA_BOT_QUOTA_LIMIT}
 
     live_snap = None
+    known_chats = []
     if wa_state.get('connected') or wa_state.get('stage') in ('pairing', 'connected_wait_ack', 'customizing', 'active'):
         try:
             live_snap = get_status_snapshot(username_lower)
         except Exception:
             live_snap = None
+        if wa_state.get('connected') or (live_snap or {}).get('connected'):
+            try:
+                known_chats = get_known_contacts(username_lower)
+            except Exception:
+                known_chats = []
 
     st_summary = {
         'stage': wa_state.get('stage', 'idle'),
@@ -135,6 +155,7 @@ def build_ai_context(username_lower: str, message: str = '') -> str:
         'sleep_state': (live_snap or {}).get('sleep_state', 'idle'),
         'messages_handled': int((live_snap or {}).get('messages_handled') or 0),
         'config': sanitize_config_summary(wa_state),
+        'known_chats': known_chats[:25],
         'wa_service_quota': {
             'limit': wa_q.get('limit', 10),
             'remaining': wa_q.get('remaining', 10),
@@ -146,6 +167,7 @@ def build_ai_context(username_lower: str, message: str = '') -> str:
         + "\n\nWHATSAPP BOT YONETIM TALIMATLARI:\n"
         "- Kullaniciya asla kalip veya numarali sihirbaz metinleri (1/5, 2/5 vb.) yazma; gercek bir asistan gibi dogal, net ve zeki yanit ver.\n"
         "- Kullanici hangi AI modelini/saglayicisini baglamak istedigini, kurallarini, bekleme suresini veya sorusunu yazdiginda bunu anlayip dogrudan yanitla veya ilgili action ile uygula.\n"
+        "- Kullanici belirli bir kisiye, numaraya veya grup sohbetine mesaj gondermeni isterse (\"Ahmet'e merhaba yaz\", \"+90555... numarasina mesaj at\", \"Aile grubuna haber ver\"), dogrudan wa_bot_send_message aksiyonunu {\"target\": \"...\", \"message\": \"...\"} parametreleriyle cagir.\n"
         "- Kurulum ve yapilandirma adimlari kullanicinin mevcut hakkini dusmez (ucretsizdir); kurulum tamamlandiktan sonra WhatsApp bot hizmeti tarafinda toplam 10 hak tanimlidir.\n"
         "- Eslestirme kodu (wa_bot_pair) uretmeden once: (1) WhatsApp hesabi kisitlama/askiya alma riskini ve sorumlulugun kullaniciya ait oldugunu acikca bildirip onayini al, (2) telefon numarasini alip eslestirmeye izin verdigini dogrula. Kullanici konusmada bunlari zaten onayladiysa ve gecerli numara verdiyse dogrudan wa_bot_pair cagir.\n"
         "- wa_bot_pair cagirirken kullanicinin verdigi numarayi params.phone alanina yaz (veya kayitli numara zaten varsa bos birakabilirsin); sahte kod uydurma, kodu arka plan servisi uretir.\n"
@@ -285,6 +307,99 @@ def action_stop(username_lower: str, params: dict) -> dict:
         'operation': 'wa_bot_stop',
         'wa_event': {'type': 'config_updated', 'config_summary': res.get('config_summary', {})},
     }
+
+
+def get_known_contacts(username_lower: str) -> list:
+    """Bagli WhatsApp oturumundaki bilinen kisi ve grup adlarini getirir."""
+    if not username_lower:
+        return []
+    res = call_wa_worker(
+        'GET',
+        '/wa/contacts?user_id=%s' % urllib.parse.quote(username_lower, safe=''),
+        timeout=5,
+    )
+    items = res.get('contacts') if isinstance(res, dict) else None
+    if not isinstance(items, list):
+        return []
+    out = []
+    for entry in items[:30]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get('name') or entry.get('notify') or '').strip()
+        if not name:
+            continue
+        out.append({'name': name[:80], 'is_group': bool(entry.get('is_group'))})
+    return out
+
+
+def send_user_message(username_lower: str, target: str, message: str) -> dict:
+    """Kullanicinin bagli WhatsApp oturumu uzerinden hedef numara, kisi veya gruba doğrudan mesaj gönderir."""
+    if not username_lower:
+        return {'success': False, 'error': 'Bu özellik için giriş yapmalısınız.'}
+    clean_target = str(target or '').strip()
+    clean_msg = str(message or '').strip()
+    if not clean_target:
+        return {'success': False, 'error': 'Hedef telefon numarası, kişi adı veya grup adı belirtilmelidir.'}
+    if not clean_msg:
+        return {'success': False, 'error': 'Gönderilecek mesaj metni boş olamaz.'}
+    if len(clean_msg) > 4000:
+        clean_msg = clean_msg[:4000]
+
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    if not wa_state.get('connected') and wa_state.get('stage') not in ('active', 'customizing', 'connected_wait_ack'):
+        snap = get_status_snapshot(username_lower)
+        if not snap.get('connected'):
+            return {'success': False, 'error': 'Aktif ve bağlı bir WhatsApp oturumu bulunamadı. Önce WhatsApp botunuzu bağlayın.'}
+
+    res = call_wa_worker(
+        'POST',
+        '/wa/send',
+        {'user_id': username_lower, 'target': clean_target, 'message': clean_msg},
+        timeout=35,
+    )
+    if not isinstance(res, dict) or not res.get('success'):
+        err = api_utils.safe_error_message(
+            (res or {}).get('error'),
+            'WhatsApp mesajı gönderilemedi. Hedef kişi/grup bulunamadı veya oturum bağlı değil.',
+        )
+        out = {'success': False, 'error': err}
+        if isinstance(res, dict):
+            if res.get('ambiguous'):
+                out['ambiguous'] = True
+            if isinstance(res.get('candidates'), list):
+                out['candidates'] = res['candidates'][:6]
+            if res.get('not_found'):
+                out['not_found'] = True
+        return out
+
+    return {
+        'success': True,
+        'sent': True,
+        'jid': str(res.get('jid') or ''),
+        'target_label': str(res.get('target_label') or clean_target),
+        'is_group': bool(res.get('is_group')),
+        'message': clean_msg,
+        'message_id': str(res.get('message_id') or ''),
+    }
+
+
+def action_send_message(username_lower: str, params: dict) -> dict:
+    p = params if isinstance(params, dict) else {}
+    target = str(
+        p.get('target') or p.get('to') or p.get('recipient') or p.get('phone') or p.get('chat') or p.get('group') or ''
+    ).strip()
+    message = str(p.get('message') or p.get('text') or p.get('body') or '').strip()
+    res = send_user_message(username_lower, target, message)
+    out = dict(res)
+    out['operation'] = 'wa_bot_send_message'
+    if res.get('success'):
+        out['wa_event'] = {
+            'type': 'message_sent',
+            'target_label': res.get('target_label') or target,
+            'message': res.get('message') or message,
+            'is_group': bool(res.get('is_group')),
+        }
+    return out
 
 
 def action_cancel_setup(username_lower: str) -> dict:
@@ -458,7 +573,26 @@ def call_wa_worker(method: str, path: str, payload=None, timeout: int = 25) -> d
         try:
             parsed = json.loads(e.read().decode('utf-8', errors='replace'))
             if isinstance(parsed, dict) and parsed.get('error'):
-                return {'success': False, 'error': api_utils.safe_error_message(parsed['error'], fallback_err)}
+                err_out = {
+                    'success': False,
+                    'error': api_utils.safe_error_message(parsed['error'], fallback_err),
+                }
+                if parsed.get('ambiguous'):
+                    err_out['ambiguous'] = True
+                if parsed.get('not_found'):
+                    err_out['not_found'] = True
+                if isinstance(parsed.get('candidates'), list):
+                    cands = []
+                    for c in parsed['candidates'][:6]:
+                        if isinstance(c, dict):
+                            cands.append({
+                                'jid': str(c.get('jid') or '')[:80],
+                                'name': str(c.get('name') or '')[:80],
+                                'is_group': bool(c.get('is_group')),
+                            })
+                    if cands:
+                        err_out['candidates'] = cands
+                return err_out
         except Exception:
             pass
         return {'success': False, 'error': fallback_err}
@@ -576,6 +710,10 @@ def _detect_provider_and_key(msg: str):
         provider = 'groq'
     elif 'openrouter' in low or key.startswith('sk-or-'):
         provider = 'openrouter'
+    elif 'deepseek' in low:
+        provider = 'deepseek'
+    elif 'mistral' in low:
+        provider = 'mistral'
     elif 'anthropic' in low or 'claude' in low or key.startswith('sk-ant-'):
         provider = 'anthropic'
     elif 'openai' in low or 'chatgpt' in low or 'gpt' in low or key.startswith('sk-'):
@@ -705,6 +843,11 @@ def get_status_snapshot(username_lower: str) -> dict:
         worker_status = worker_res.get('status', wa_state.get('stage'))
         sleep_state = worker_res.get('sleep_state') or ('sleeping' if wa_state.get('connected') else 'idle')
         messages_handled = int(worker_res.get('messages_handled') or 0)
+        if wa_state.get('connected') and worker_status in ('reconnecting', 'disconnected'):
+            try:
+                wake_user_bot(username_lower, force=False)
+            except Exception:
+                pass
     else:
         worker_status = wa_state.get('stage', 'idle')
         sleep_state = 'sleeping' if wa_state.get('connected') else 'idle'
@@ -815,6 +958,28 @@ def process_action_outcome(action_res, clean_reply: str, orig_reply: str) -> tup
         fallback = 'WhatsApp bot ayarları güncellendi.' if op == 'wa_bot_update' else 'WhatsApp botu durduruldu.'
         return True, None, clean_reply or orig_reply or fallback, wa_event
 
+    if op == 'wa_bot_send_message':
+        if not action_res.get('success'):
+            err = api_utils.safe_error_message(
+                action_res.get('error'),
+                'WhatsApp mesajı gönderilemedi.',
+            )
+            cands = action_res.get('candidates') if isinstance(action_res.get('candidates'), list) else []
+            cand_txt = ''
+            if cands:
+                names = [str(c.get('name') or c.get('jid') or '') for c in cands if isinstance(c, dict)]
+                names = [n for n in names if n]
+                if names:
+                    cand_txt = '\nEşleşen sohbetler: ' + ', '.join(names)
+            return True, None, '⚠️ %s%s' % (err, cand_txt), {
+                'type': 'send_failed',
+                'error': err,
+                'candidates': cands,
+            }
+        target_label = str(action_res.get('target_label') or 'hedef sohbet')
+        msg_preview = clean_reply or orig_reply or ('✅ Mesajınız **%s** sohbetine gönderildi.' % target_label)
+        return True, None, msg_preview, wa_event
+
     return True, None, clean_reply or orig_reply, wa_event
 
 
@@ -916,7 +1081,17 @@ def apply_structured_update(username_lower: str, params: dict) -> dict:
                 cur_cai['api_key_enc'] = database.encrypt_secret_value(raw_key)
                 cur_cai['has_key'] = True
                 provider = provider or det_p or 'openai'
-            cur_cai['enabled'] = bool(cai_in.get('enabled', True) and (cur_cai.get('has_key') or cur_cai.get('api_key_enc')))
+            if endpoint:
+                ok_ep, clean_ep_or_err = api_utils.validate_custom_ai_endpoint(endpoint)
+                if not ok_ep:
+                    return {
+                        'success': False,
+                        'operation': 'wa_bot_update',
+                        'error': clean_ep_or_err,
+                    }
+                endpoint = clean_ep_or_err
+            has_usable = bool(cur_cai.get('has_key') or cur_cai.get('api_key_enc') or (provider == 'custom' and endpoint))
+            cur_cai['enabled'] = bool(cai_in.get('enabled', True) and has_usable)
             cur_cai['provider'] = provider
             cur_cai['model'] = model
             cur_cai['endpoint'] = endpoint
@@ -935,6 +1110,11 @@ def apply_structured_update(username_lower: str, params: dict) -> dict:
         call_wa_worker('POST', '/wa/stop', {'user_id': username_lower, 'logout': False}, timeout=8)
     else:
         _sync_worker_config(username_lower, wa_state)
+        if wa_state.get('connected') and cfg_obj.get('enabled'):
+            try:
+                wake_user_bot(username_lower, force=True)
+            except Exception:
+                pass
     database.save_user_wa_bot(username_lower, wa_state)
     summary = sanitize_config_summary(wa_state)
     ev_type = 'bot_ready' if finalized else 'config_updated'
@@ -945,6 +1125,53 @@ def apply_structured_update(username_lower: str, params: dict) -> dict:
         'config_summary': summary,
         'wa_event': {'type': ev_type, 'config_summary': summary},
     }
+
+
+def sync_custom_ai_from_settings(username_lower: str, stored_settings: dict) -> bool:
+    """
+    Ayarlar menusunden degistirilen AI saglayici/model/anahtar ayarlarini kullanicinin
+    WhatsApp botuna otonom olarak yansitir ve canli servisi gunceller.
+    """
+    if not username_lower or not isinstance(stored_settings, dict):
+        return False
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    cfg_obj = wa_state['config']
+    provider = str(stored_settings.get('provider') or 'default').strip().lower()
+    apply_wa = bool(stored_settings.get('apply_to_whatsapp', True))
+
+    if provider in ('', 'default') or not apply_wa:
+        cfg_obj['custom_ai'] = {
+            'enabled': False,
+            'provider': '',
+            'model': '',
+            'endpoint': '',
+            'api_key_enc': '',
+            'has_key': False,
+        }
+    else:
+        api_key_enc = str(stored_settings.get('api_key_enc') or '').strip()
+        endpoint = str(stored_settings.get('endpoint') or '').strip()
+        model = str(stored_settings.get('model') or '').strip()
+        has_key = bool(api_key_enc)
+        enabled = bool(has_key or (provider == 'custom' and endpoint))
+        cfg_obj['custom_ai'] = {
+            'enabled': enabled,
+            'provider': provider,
+            'model': model,
+            'endpoint': endpoint,
+            'api_key_enc': api_key_enc,
+            'has_key': has_key,
+        }
+
+    saved = database.save_user_wa_bot(username_lower, wa_state)
+    if wa_state.get('connected') or wa_state.get('stage') in ('active', 'customizing', 'connected_wait_ack', 'pairing'):
+        _sync_worker_config(username_lower, wa_state)
+        if wa_state.get('connected') and cfg_obj.get('enabled', True):
+            try:
+                wake_user_bot(username_lower, force=True)
+            except Exception:
+                pass
+    return saved
 
 
 # Statik kalip akisi kaldirildi: tum yonetim Aslan AI + wa_bot_* aksiyonlari uzerinden yurur.

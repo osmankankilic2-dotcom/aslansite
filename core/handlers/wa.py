@@ -10,7 +10,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import api_utils, auth, config as cfg, wa_bot
+from core import api_utils, auth, config as cfg, database, quota as quota_mod, wa_bot
 
 
 class handler(BaseHTTPRequestHandler):
@@ -30,7 +30,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             action = self._action_name()
-            if action != 'status':
+            if action not in ('status', 'contacts'):
                 api_utils.send_json(self, 404, {'error': 'Bilinmeyen WhatsApp yolu'},
                                     methods='GET, POST, OPTIONS')
                 return
@@ -40,6 +40,11 @@ class handler(BaseHTTPRequestHandler):
                     'error': 'Bu özellik için giriş yapmalısınız.',
                     'auth_required': True,
                 }, methods='GET, POST, OPTIONS')
+                return
+            if action == 'contacts':
+                contacts = wa_bot.get_known_contacts(user['username_lower'])
+                api_utils.send_json(self, 200, {'success': True, 'contacts': contacts},
+                                    methods='GET, POST, OPTIONS')
                 return
             snap = wa_bot.get_status_snapshot(user['username_lower'])
             api_utils.send_json(self, 200, snap, methods='GET, POST, OPTIONS')
@@ -83,6 +88,36 @@ class handler(BaseHTTPRequestHandler):
             if action == 'wake':
                 res = wa_bot.wake_user_bot(uname_lower, force=bool(data.get('force', True)))
                 api_utils.send_json(self, 200 if res.get('success') else 502, res,
+                                    methods='GET, POST, OPTIONS')
+                return
+            if action == 'send':
+                wa_allowed, wa_usage = database.check_user_wa_quota(uname_lower)
+                if not wa_allowed:
+                    snap = database.user_quota_snapshot(user)
+                    api_utils.send_json(self, 429, {
+                        'error': 'WhatsApp bot hizmeti için tanımlı %d kullanım hakkınız doldu.'
+                                 % wa_usage.get('limit', cfg.WA_BOT_QUOTA_LIMIT),
+                        'quota': snap,
+                    }, methods='GET, POST, OPTIONS')
+                    return
+                ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                    api_utils.client_ip(self.headers), 'wa', cfg.IP_WA_HOURLY_LIMIT, 3600)
+                if not ip_ok:
+                    api_utils.send_json(self, 429, {
+                        'error': 'Saatlik bot istek sınırına ulaşıldı. %d saniye sonra tekrar deneyin.'
+                                 % ip_usage.get('reset_in', 60)
+                    }, methods='GET, POST, OPTIONS')
+                    return
+                res = wa_bot.send_user_message(
+                    uname_lower,
+                    target=data.get('target') or data.get('to') or data.get('phone') or '',
+                    message=data.get('message') or data.get('text') or '',
+                )
+                if res.get('success'):
+                    database.consume_user_wa_quota(uname_lower)
+                fresh_u = database.get_user_by_username(uname_lower) or user
+                res['quota'] = database.user_quota_snapshot(fresh_u)
+                api_utils.send_json(self, 200 if res.get('success') else 400, res,
                                     methods='GET, POST, OPTIONS')
                 return
 

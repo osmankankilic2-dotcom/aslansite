@@ -31,6 +31,8 @@ var state = {
     authReturnTab: '',
     user: null,
     quota: { ai: null, image: null, wa_bot: null },
+    aiSettings: null,
+    aiProviders: [],
     systemProfile: null,
     powerMode: 'high',
     perfTier: 'high',

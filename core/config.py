@@ -62,6 +62,8 @@ IP_SOCIAL_DAILY_LIMIT = 30
 IP_AUTH_HOURLY_LIMIT = 25
 IP_MEDIA_HOURLY_LIMIT = 40
 IP_WA_HOURLY_LIMIT = 60
+IP_API_PER_MINUTE_LIMIT = 180
+IP_SETTINGS_HOURLY_LIMIT = 40
 
 # ---------------------------------------------------------------- girdi & medya sinirlari
 MAX_FILE_SIZE = 50 * 1024 * 1024             # 50 MB (yerel dosya siniri)

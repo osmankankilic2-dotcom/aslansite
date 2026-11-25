@@ -19,6 +19,7 @@ from flask import Flask, jsonify, make_response, request, send_file, send_from_d
 
 from core import (
     ai_engine,
+    ai_settings,
     api_utils,
     auth,
     blob_store,
@@ -56,9 +57,25 @@ _strip_aslan_action = ai_engine.strip_action
 # ==================== GUVENLIK & CORS KANCALARI ====================
 @app.before_request
 def _enforce_origin_policy():
-    if request.path.startswith('/api/') and request.method in ('POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'):
-        if api_utils.reject_disallowed_origin(request.headers):
-            return jsonify({'error': 'Kaynak izni reddedildi.'}), 403
+    if request.path.startswith('/api/'):
+        guard_status, guard_msg = api_utils.check_api_access_guard(
+            request.headers, path=request.path, method=request.method)
+        if guard_status:
+            return jsonify({'error': guard_msg}), guard_status
+        base_p = (request.path or '/').rstrip('/').lower()
+        if request.method != 'OPTIONS' and not api_utils.is_cron_or_keepalive_request(
+            request.headers, path=base_p
+        ) and base_p not in ('/api/ping', '/api/whatsapp/keep-alive'):
+            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                get_client_ip(), 'api_global', getattr(cfg, 'IP_API_PER_MINUTE_LIMIT', 120), 60)
+            if not ip_ok:
+                resp = jsonify({
+                    'error': 'Çok fazla API isteği gönderildi. Lütfen %d saniye bekleyin.'
+                             % ip_usage.get('reset_in', 15)
+                })
+                resp.status_code = 429
+                resp.headers['Retry-After'] = str(max(1, int(ip_usage.get('reset_in', 15))))
+                return resp
 
 
 @app.after_request
@@ -67,7 +84,7 @@ def _apply_security_and_cors(response):
     for k, v in api_utils.security_headers(is_api=is_api).items():
         response.headers.setdefault(k, v)
     if is_api:
-        for k, v in api_utils.cors_headers(request.headers, methods='GET, POST, OPTIONS').items():
+        for k, v in api_utils.cors_headers(request.headers, methods='GET, POST, DELETE, OPTIONS').items():
             response.headers[k] = v
     else:
         response.headers.setdefault(
@@ -75,9 +92,12 @@ def _apply_security_and_cors(response):
             'camera=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=(), microphone=(self)',
         )
         csp = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "default-src 'self'; "
+            "script-src 'self' https://pagead2.googlesyndication.com https://fundingchoicesmessages.google.com; "
+            "style-src 'self'; "
             "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; "
             "connect-src 'self' https:; font-src 'self' data:; "
+            "frame-src https://googleads.g.doubleclick.net https://tpc.googlesyndication.com https://fundingchoicesmessages.google.com; "
             "worker-src 'self'; manifest-src 'self'; "
             "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         )
@@ -89,6 +109,12 @@ def _apply_security_and_cors(response):
             response.headers['Service-Worker-Allowed'] = '/'
         elif request.path == '/manifest.json':
             response.headers['Content-Type'] = 'application/manifest+json; charset=utf-8'
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+        elif request.path == '/sitemap.xml':
+            response.headers['Content-Type'] = 'application/xml; charset=utf-8'
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+        elif request.path == '/robots.txt':
+            response.headers['Content-Type'] = 'text/plain; charset=utf-8'
             response.headers['Cache-Control'] = 'public, max-age=3600'
         elif request.path.startswith('/assets/'):
             response.headers['Cache-Control'] = 'public, max-age=3600, must-revalidate'
@@ -247,6 +273,25 @@ def auth_logout():
     try:
         auth.logout_request(request.headers)
         return jsonify({'success': True})
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/auth/delete-account', methods=['POST'])
+@app.route('/api/auth/account', methods=['DELETE'])
+def auth_delete_account():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Geçersiz istek gövdesi', 400)
+        ok, payload_or_err, status = auth.delete_user_account(
+            request.headers,
+            password=data.get('password', ''),
+            confirm=bool(data.get('confirm')),
+        )
+        if not ok:
+            return _error(payload_or_err, status)
+        return jsonify({'success': True, **payload_or_err}), status
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 
@@ -516,9 +561,11 @@ def ai():
                               % (file.filename, mime_type)})
 
         all_available = available_files + context_metas
+        user_ai_cfg = ai_settings.build_runtime_ai_settings(uname_lower)
         reply, error = ai_engine.generate_reply(
             message, parts=parts, available_files=all_available,
-            api_key=get_gemini_api_key(), history=history, extra_context=extra_ctx)
+            api_key=get_gemini_api_key(), history=history, extra_context=extra_ctx,
+            user_ai_config=user_ai_cfg)
         if not reply:
             return _error(
                 api_utils.safe_error_message(error, 'Yanit alinamadi'),
@@ -537,6 +584,9 @@ def ai():
                 action, uploaded_files=all_available, username_lower=uname_lower)
             wa_handled, media_result, reply, wa_event = wa_bot.process_action_outcome(
                 media_result, clean_reply, reply)
+            if wa_handled and credit_bucket == 'ai' and isinstance(action, dict):
+                if action.get('action') in ('wa_bot_send_message', 'wa_bot_update', 'wa_bot_stop'):
+                    credit_bucket = 'wa_bot'
             if wa_handled:
                 created_outputs.extend(pipe_paths)
             elif isinstance(media_result, dict):
@@ -1009,6 +1059,85 @@ def wa_wake():
         data = request.get_json(force=True, silent=True) or {}
         res = wa_bot.wake_user_bot(user['username_lower'], force=bool(data.get('force', True)))
         return jsonify(res), (200 if res.get('success') else 502)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/contacts', methods=['GET'])
+def wa_contacts():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        return jsonify({'success': True, 'contacts': wa_bot.get_known_contacts(user['username_lower'])})
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/send', methods=['POST'])
+def wa_send():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        uname_lower = user['username_lower']
+        wa_allowed, wa_usage = database.check_user_wa_quota(uname_lower)
+        if not wa_allowed:
+            snap = database.user_quota_snapshot(user)
+            return jsonify({
+                'error': 'WhatsApp bot hizmeti için tanımlı %d kullanım hakkınız doldu.'
+                         % wa_usage.get('limit', cfg.WA_BOT_QUOTA_LIMIT),
+                'quota': snap,
+            }), 429
+        ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+            get_client_ip(), 'wa', cfg.IP_WA_HOURLY_LIMIT, 3600)
+        if not ip_ok:
+            return _error(
+                'Saatlik bot istek sınırına ulaşıldı. %d saniye sonra tekrar deneyin.'
+                % ip_usage.get('reset_in', 60),
+                429,
+            )
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Geçersiz istek gövdesi', 400)
+        res = wa_bot.send_user_message(
+            uname_lower,
+            target=data.get('target') or data.get('to') or data.get('phone') or '',
+            message=data.get('message') or data.get('text') or '',
+        )
+        if res.get('success'):
+            database.consume_user_wa_quota(uname_lower)
+        fresh_u = database.get_user_by_username(uname_lower) or user
+        res['quota'] = database.user_quota_snapshot(fresh_u)
+        return jsonify(res), (200 if res.get('success') else 400)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/settings/ai', methods=['GET', 'POST'])
+def settings_ai():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Ayarlar için giriş yapmalısınız.', 'auth_required': True}), 401
+        uname_lower = user['username_lower']
+        if request.method == 'GET':
+            return jsonify(ai_settings.get_client_settings_payload(uname_lower))
+        ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+            get_client_ip(), 'settings', getattr(cfg, 'IP_SETTINGS_HOURLY_LIMIT', 40), 3600)
+        if not ip_ok:
+            return _error(
+                'Çok fazla ayar güncelleme isteği. %d saniye sonra tekrar deneyin.'
+                % ip_usage.get('reset_in', 60),
+                429,
+            )
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Geçersiz ayar verisi', 400)
+        ok, res_or_err, status = ai_settings.update_user_ai_settings(uname_lower, data)
+        if not ok:
+            return _error(res_or_err, status)
+        return jsonify(res_or_err), status
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 

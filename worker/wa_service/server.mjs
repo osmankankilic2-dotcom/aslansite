@@ -3,11 +3,14 @@ import http from 'node:http';
 import { URL } from 'node:url';
 import { ipv4Get } from './ipv4.mjs';
 import {
+    getContacts,
     getStatus,
     keepAliveActiveBots,
     mockConnect,
     mockDisconnect,
     restorePersistedBots,
+    sendDirectMessage,
+    setMockContacts,
     startPairing,
     stopBot,
     updateConfig,
@@ -98,6 +101,11 @@ const server = http.createServer(async (req, res) => {
             sendJson(res, 200, getStatus(uid));
             return;
         }
+        if (req.method === 'GET' && pathname === '/wa/contacts') {
+            const uid = url.searchParams.get('user_id') || '';
+            sendJson(res, 200, { success: true, contacts: getContacts(uid) });
+            return;
+        }
 
         if (req.method === 'POST') {
             const body = await readJsonBody(req);
@@ -116,6 +124,11 @@ const server = http.createServer(async (req, res) => {
                 sendJson(res, 200, result);
                 return;
             }
+            if (pathname === '/wa/send') {
+                const result = await sendDirectMessage(body.user_id, body.target, body.message);
+                sendJson(res, result.success ? 200 : 400, result);
+                return;
+            }
             if (pathname === '/wa/wake') {
                 keepAliveActiveBots();
                 sendJson(res, 200, { ok: true, awake: true, sleep_wake: true, ts: Math.floor(Date.now() / 1000) });
@@ -128,6 +141,11 @@ const server = http.createServer(async (req, res) => {
             }
             if (pathname === '/wa/mock-disconnect' && process.env.WA_MOCK_MODE === '1') {
                 const result = mockDisconnect(body.user_id);
+                sendJson(res, result.success ? 200 : 400, result);
+                return;
+            }
+            if (pathname === '/wa/mock-contacts' && process.env.WA_MOCK_MODE === '1') {
+                const result = setMockContacts(body.user_id, body.contacts);
                 sendJson(res, result.success ? 200 : 400, result);
                 return;
             }

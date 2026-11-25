@@ -98,7 +98,7 @@ export function ipv4PostJson(urlStr, payload, headers = {}, timeoutMs = 25000) {
 /**
  * Performs a lightweight GET request strictly over IPv4 for silent keep-alive pings.
  */
-export function ipv4Get(urlStr, headers = {}, timeoutMs = 8000) {
+export function ipv4Get(urlStr, headers = {}, timeoutMs = 8000, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         let parsed;
         try {
@@ -125,8 +125,22 @@ export function ipv4Get(urlStr, headers = {}, timeoutMs = 8000) {
             }, headers || {}),
         };
         const req = mod.request(reqOpts, (res) => {
+            const statusCode = res.statusCode || 200;
+            const loc = res.headers && res.headers.location;
+            if (loc && [301, 302, 303, 307, 308].includes(statusCode) && redirectCount < 3) {
+                res.resume();
+                try {
+                    const nextUrl = new URL(loc, urlStr);
+                    if (nextUrl.protocol === 'https:' || nextUrl.protocol === 'http:') {
+                        ipv4Get(nextUrl.toString(), headers, timeoutMs, redirectCount + 1)
+                            .then(resolve)
+                            .catch(reject);
+                        return;
+                    }
+                } catch (_) {}
+            }
             res.resume();
-            res.on('end', () => resolve({ status: res.statusCode || 200 }));
+            res.on('end', () => resolve({ status: statusCode }));
         });
         req.on('timeout', () => req.destroy(new Error('KeepAlive timeout')));
         req.on('error', reject);

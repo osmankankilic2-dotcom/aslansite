@@ -29,6 +29,17 @@ _RAW_TECH_ERR_RE = re.compile(
     r'modulenotfounderror|importerror|filenotfounderror|calledprocesserror|\[errno\s+\d+\])',
     re.IGNORECASE,
 )
+_BLOCKED_API_BOT_RE = re.compile(
+    r'(?:sqlmap|nikto|nmap|masscan|zgrab|nuclei|wpscan|gobuster|dirbuster|ffuf|'
+    r'burpsuite|acunetix|nessus|openvas|hydra|metasploit|scrapy|'
+    r'python-requests|python-urllib|aiohttp|httpx|curl/|wget/|libwww-perl|'
+    r'go-http-client|apache-httpclient|axios/|node-fetch|undici|'
+    r'postmanruntime|insomnia|headlesschrome|phantomjs|selenium|puppeteer|playwright|'
+    r'googlebot|adsbot-google|mediapartners-google|bingbot|yandexbot|ahrefsbot|'
+    r'semrushbot|mj12bot|dotbot|bytespider|gptbot|ccbot|claudebot)',
+    re.IGNORECASE,
+)
+_CRON_KEEPALIVE_PATHS = frozenset({'/api/ping', '/api/whatsapp/keep-alive'})
 
 
 def _header(headers, name: str) -> str:
@@ -189,6 +200,53 @@ def reject_disallowed_origin(headers) -> bool:
 def reject_cross_site_request(headers) -> bool:
     """reject_disallowed_origin icin aciklayici takma ad."""
     return reject_disallowed_origin(headers)
+
+
+def is_cron_or_keepalive_request(headers, path: str = '') -> bool:
+    """Vercel Cron ve yetkili keep-alive ping isteklerini tanir."""
+    base_path = (str(path or '/').split('?', 1)[0].rstrip('/').lower()) or '/'
+    if base_path not in _CRON_KEEPALIVE_PATHS:
+        return False
+    ua = _header(headers, 'User-Agent').strip().lower()
+    if ua.startswith('vercel-cron') or ua.startswith('aslan-ai-keepalive'):
+        return True
+    if _header(headers, 'X-Vercel-Cron').strip():
+        return True
+    return False
+
+
+def reject_api_bot(headers, path: str = '') -> bool:
+    """/api/* uclarina yonelik otomatik tarayici, CLI ve harici bot isteklerini engeller."""
+    if is_cron_or_keepalive_request(headers, path):
+        return False
+    ua = _header(headers, 'User-Agent').strip()
+    if ua and _BLOCKED_API_BOT_RE.search(ua):
+        return True
+    return False
+
+
+def check_api_access_guard(headers, path: str = '', method: str = 'GET') -> tuple:
+    """
+    Tum /api/* uclari icin merkezi kaynak, bot ve tarayici dogrulamasi:
+      Returns: (http_status_or_0, error_message)
+    """
+    if reject_disallowed_origin(headers):
+        return 403, 'Kaynak izni reddedildi.'
+    if reject_api_bot(headers, path):
+        return 403, 'Otomatik bot veya harici istemci erişimi engellendi.'
+
+    strict_mode = bool(os.environ.get('VERCEL') or os.environ.get('ASLAN_STRICT_API_GUARD') == '1')
+    m_up = str(method or 'GET').upper()
+    if strict_mode and m_up != 'OPTIONS' and not is_cron_or_keepalive_request(headers, path):
+        x_req = _header(headers, 'X-Requested-With').strip().lower()
+        if x_req != 'aslanweb':
+            return 403, 'Bu iç uç noktaya doğrudan harici erişim engellenmiştir.'
+        sec_site = _header(headers, 'Sec-Fetch-Site').strip().lower()
+        origin = _header(headers, 'Origin').strip()
+        referer = _header(headers, 'Referer').strip()
+        if sec_site not in ('same-origin', 'same-site') and not origin and not referer:
+            return 403, 'Bu iç uç noktaya doğrudan harici erişim engellenmiştir.'
+    return 0, ''
 
 
 def cors_headers(headers, methods: str = 'GET, POST, OPTIONS') -> dict:
@@ -381,6 +439,66 @@ def validate_social_url(url: str):
         pass
     except Exception:
         return False, 'Hedef alan adi dogrulanamadi.'
+
+    return True, cleaned
+
+
+def validate_custom_ai_endpoint(url: str) -> tuple:
+    """
+    Kullanici tarafindan Ayarlar menusunden girilen ozel AI uc noktasini SSRF'ye karsi dogrular.
+    Yalnizca genel internete acik gecerli HTTPS uc noktalari kabul edilir.
+
+    Returns: (gecerli_mi, hata_mesaji_veya_temiz_url)
+    """
+    cleaned = str(url or '').strip()
+    if not cleaned:
+        return False, 'Özel uç nokta URL adresi gerekli.'
+    if len(cleaned) > 512 or any(ch.isspace() or ord(ch) < 32 for ch in cleaned):
+        return False, 'Geçersiz özel uç nokta URL biçimi.'
+
+    try:
+        parsed = urlparse(cleaned)
+    except Exception:
+        return False, 'Geçersiz özel uç nokta URL adresi.'
+
+    if parsed.scheme.lower() != 'https':
+        return False, 'Özel uç nokta yalnızca HTTPS protokolü (https://...) kullanmalıdır.'
+    if parsed.username or parsed.password:
+        return False, 'Kimlik bilgisi içeren uç nokta URL adreslerine izin verilmiyor.'
+
+    hostname = (parsed.hostname or '').lower().rstrip('.')
+    if not hostname:
+        return False, 'Geçersiz uç nokta alan adı.'
+
+    if (
+        hostname in _LOCAL_HOSTS
+        or hostname == 'metadata.google.internal'
+        or hostname.endswith('.local')
+        or hostname.endswith('.internal')
+        or hostname.endswith('.localhost')
+    ):
+        return False, 'Yerel ağ veya dahili sunucu adreslerine güvenlik nedeniyle izin verilmiyor.'
+
+    try:
+        ipaddress.ip_address(hostname)
+        return False, 'Güvenlik nedeniyle doğrudan IP adresi yerine geçerli bir HTTPS alan adı girin.'
+    except ValueError:
+        pass
+
+    if parsed.port is not None and parsed.port not in (443, 8443):
+        return False, 'Özel uç nokta yalnızca standart 443 veya 8443 HTTPS portlarını kullanabilir.'
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+        for item in infos:
+            addr = item[4][0].split('%', 1)[0]
+            ip_obj = ipaddress.ip_address(addr)
+            if not ip_obj.is_global or ip_obj.is_multicast:
+                return False, 'Güvenlik nedeniyle özel/yerel ağ adreslerine yönlenen alan adlarına izin verilmiyor.'
+    except socket.gaierror:
+        pass
+    except Exception:
+        return False, 'Özel uç nokta alan adı doğrulanamadı.'
 
     return True, cleaned
 

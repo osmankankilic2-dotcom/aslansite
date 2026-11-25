@@ -15,7 +15,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import ai_engine, api_utils, auth, config as cfg, database, pipeline, quota as quota_mod, wa_bot
+from core import ai_engine, ai_settings, api_utils, auth, config as cfg, database, pipeline, quota as quota_mod, wa_bot
 
 cfg.ensure_dirs()
 AI_DAILY_LIMIT = cfg.AI_DAILY_LIMIT
@@ -202,9 +202,11 @@ class handler(BaseHTTPRequestHandler):
                                   % (meta['name'], mime_type)})
 
             all_available = metas + context_metas
+            user_ai_cfg = ai_settings.build_runtime_ai_settings(uname_lower)
             reply, error = ai_engine.generate_reply(
                 message, parts=parts, available_files=all_available,
-                api_key=ai_engine.get_api_key(), history=history, extra_context=extra_ctx)
+                api_key=ai_engine.get_api_key(), history=history, extra_context=extra_ctx,
+                user_ai_config=user_ai_cfg)
             if not reply:
                 api_utils.send_json(
                     self, 502,
@@ -228,6 +230,9 @@ class handler(BaseHTTPRequestHandler):
                 created_outputs.extend(pipe_paths)
                 wa_handled, media_result, reply, wa_event = wa_bot.process_action_outcome(
                     media_result, clean_reply, reply)
+                if wa_handled and credit_bucket == 'ai' and isinstance(action, dict):
+                    if action.get('action') in ('wa_bot_send_message', 'wa_bot_update', 'wa_bot_stop'):
+                        credit_bucket = 'wa_bot'
                 if not wa_handled and isinstance(media_result, dict):
                     if media_result.get('operation') == 'generate_image' and media_result.get('success'):
                         image_result = media_result

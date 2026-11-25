@@ -346,9 +346,11 @@ def main():
     check("Served HTML has cookie banner", "cookie-banner" in body)
     check("Served HTML has all 3 legal pages",
           all(x in body for x in ("legal-page-terms", "legal-page-privacy", "legal-page-cookies")))
-    check("Served HTML has 3 clean tabs (Medya tab removed)",
-          all(x in body for x in ("panel-tts", "panel-ai", "panel-legal"))
-          and 'id="panel-media"' not in body)
+    check("Served HTML has 3 clean tabs (Ses, Aslan AI, Ayarlar; Yasal & Medya tabs removed)",
+          all(x in body for x in ("panel-tts", "panel-ai", "panel-settings"))
+          and 'id="panel-media"' not in body
+          and 'data-tab="legal"' not in body
+          and "site-footer" in body)
     check("Served HTML has chat input + file input",
           'id="ai-input"' in body and 'id="ai-file"' in body)
     check("Served HTML has attachment tray", 'id="attach-tray"' in body)

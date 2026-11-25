@@ -22,10 +22,25 @@ const JS_ORDER = [
     'pwa.js',
     'ui.js',
     'auth.js',
+    'settings.js',
     'tts.js',
     'ai.js',
     'main.js',
 ];
+
+function buildGoogleHeadTags() {
+    const tags = [];
+    const verify = String(process.env.GOOGLE_SITE_VERIFICATION || '').trim();
+    if (verify && /^[A-Za-z0-9_-]{8,128}$/.test(verify)) {
+        tags.push(`<meta name="google-site-verification" content="${verify}">`);
+    }
+    const adsense = String(process.env.GOOGLE_ADSENSE_CLIENT || '').trim();
+    if (adsense && /^ca-pub-[0-9]{10,20}$/.test(adsense)) {
+        tags.push(`<meta name="google-adsense-account" content="${adsense}">`);
+        tags.push(`<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${adsense}" crossorigin="anonymous"></script>`);
+    }
+    return tags.join('');
+}
 
 const REGEX_PREV_KEYWORDS = new Set([
     'return', 'throw', 'case', 'delete', 'typeof', 'void',
@@ -267,7 +282,11 @@ function main() {
     const outHtmlPath = path.join(PUBLIC_DIR, 'index.html');
     const outSwPath = path.join(PUBLIC_DIR, 'sw.js');
 
-    const finalHtml = minifyHtmlSafe(rawHtml.replaceAll('__BUILD_HASH__', hash));
+    const finalHtml = minifyHtmlSafe(
+        rawHtml
+            .replace('<!-- __GOOGLE_HEAD_TAGS__ -->', buildGoogleHeadTags())
+            .replaceAll('__BUILD_HASH__', hash)
+    );
     const finalSw = minifyJsSafe(rawSw.replaceAll('__BUILD_HASH__', hash));
 
     fs.writeFileSync(outCssPath, minCss, 'utf8');

@@ -147,6 +147,7 @@ Kullanilabilir action degerleri:
     - wa_bot_update        -> Updates WhatsApp bot rules, tone, groups, typing delay, or custom AI provider/model/key (set finalize_setup=true once initial customization is ready): {"action":"wa_bot_update","files":[],"params":{"enabled":true,"allow_groups":false,"allow_private":true,"group_mode":"off","trigger_keywords":["..."],"ignored_keywords":["..."],"typing_delay_seconds":2,"show_typing":true,"tone":"...","instructions":"...","default_reply":"...","rules":[{"match_type":"contains","trigger":"...","response":"..."}],"auto_reactions":[{"trigger":"...","emoji":"❤️"}],"custom_ai":{"enabled":true,"provider":"gemini","model":"gemini-4-hydrogen","api_key":"..."},"finalize_setup":true}}
     - wa_bot_wake          -> Wakes the background WhatsApp bot session immediately: {"action":"wa_bot_wake","files":[],"params":{"force":true}}
     - wa_bot_stop          -> Pauses or logs out the WhatsApp bot: {"action":"wa_bot_stop","files":[],"params":{"logout":false}}
+    - wa_bot_send_message  -> Sends a direct WhatsApp message to any person, phone number, or group chat through the user's connected WhatsApp session: {"action":"wa_bot_send_message","files":[],"params":{"target":"<telefon_numarasi_kisi_adi_veya_grup_adi>","message":"<gonderilecek_mesaj>"}}
     - wa_bot_cancel_setup  -> Cancels an active setup session: {"action":"wa_bot_cancel_setup","files":[],"params":{}}
 - image_audio_video      -> Gorsel + sesi videoya donusturur (files: [gorsel_id_veya_$last_image, ses_id_veya_$last_audio])
 - add_text               -> Gorsel veya videoya yazi ekler (params: text, position "top"|"center"|"bottom", font_size, color)
@@ -177,6 +178,7 @@ KURALLAR:
 - Kullanici video linki verip "bu videoyu indir" derse "social_download" kullan; sonraki mesajda "indirdigin videoyu kirp / sesini ayir / yazi ekle" derse listedeki mevcut dosya kimligini ($last_video veya yuklenen dosya id'sini) files icine yaz.
 - Kullanici "bunu sesli oku", "hizi artir", "sesi Emel yap", "okumayi durdur" derse uygun "tts" veya "tts_control" blogunu ekle.
 - Kullanici mevcut veya yeni WhatsApp botundan bahsettiginde, kurulum sordugunda, numara veya yapay zeka modeli belirttiginde asla kalip/sabit sablon metinler yazma; EK BILGI bolumundeki canli WhatsApp durumuna gore dogal ve akilli sohbet et ve uygun "wa_bot_*" action blogunu kullan. Asla arka plan kutuphane/protokol adi (Baileys, Vercel vb.) veya kullanicinin ham API anahtarini yanitta yazma.
+- Kullanici bagli WhatsApp botu aktifken belirli bir kisiye, telefon numarasına veya gruba doğrudan mesaj göndermeni isterse ("Ahmet'e şunu yaz", "90555... numarasına şunu gönder", "Aile grubuna şunu yaz" vb.), mutlaka "wa_bot_send_message" aksiyonunu "target" ve "message" parametreleriyle kullan; aksiyonu eklemeden "gönderildi" iddiasında bulunma.
 - Kullanici "iki gorsel uret, birlestirip video yap ve ses ekle" gibi cok adimli istekte bulunursa mutlaka "steps" dizisi kullan.
 - files icindeki degerler kullanicinin yukledigi/urettigi dosyalarin kimlikleridir (asagida listelenir) veya adim referanslaridir ($img1, $last_image, $last_video, $last_audio).
 - Eylem gerekmiyorsa aslan_action blogunu YAZMA.
@@ -503,17 +505,190 @@ def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, h
     return None, last_error
 
 
-def generate_reply(message, parts=None, available_files=None, api_key=None, history=None, extra_context=''):
+def _try_user_custom_ai(user_ai_cfg, message, parts=None, available_files=None, history=None, extra_context=''):
+    """Kullanicinin Ayarlar menusunden sectigi saglayici / model / ozel HTTPS uc noktayla yanit uretir."""
+    if not isinstance(user_ai_cfg, dict):
+        return None, 'Özel AI yapılandırması geçersiz.'
+
+    provider = str(user_ai_cfg.get('provider') or '').strip().lower()
+    model = str(user_ai_cfg.get('model') or '').strip()
+    endpoint = str(user_ai_cfg.get('endpoint') or '').strip()
+    api_key = str(user_ai_cfg.get('api_key') or '').strip()
+
+    if provider == 'gemini':
+        if not api_key:
+            return None, 'Google Gemini için API anahtarı bulunamadı.'
+        contents = _build_contents(message, parts=parts, history=history)
+        if not contents:
+            return None, 'Mesaj bos'
+        base_ep = endpoint or GEMINI_ENDPOINT
+        if endpoint and ':generatecontent' in endpoint.lower():
+            url = endpoint
+        else:
+            m_name = model or GEMINI_TEXT_MODEL
+            url = '%s/%s:generateContent' % (base_ep.rstrip('/'), urllib.parse.quote(m_name, safe=''))
+        payload = {
+            'contents': contents,
+            'systemInstruction': {'parts': [{'text': build_system_prompt(available_files, extra_context=extra_context)}]},
+            'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2048},
+        }
+        try:
+            data = _post_json(url, payload, timeout=45, headers={'x-goog-api-key': api_key})
+            reply = _extract_text(data)
+            if reply:
+                return reply, None
+            return None, 'Seçili model yanıt döndürmedi.'
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return None, 'Google Gemini API anahtarınız reddedildi veya yetkisiz.'
+            return None, 'Seçili yapay zeka servisi geçici olarak yanıt vermedi.'
+        except Exception as e:
+            return None, api_utils.safe_error_message(e, 'Seçili yapay zeka servisine bağlanılamadı.')
+
+    messages = _build_openai_messages(
+        message,
+        history=history,
+        available_files=available_files,
+        parts=parts,
+        extra_context=extra_context,
+    )
+    if not messages:
+        return None, 'Mesaj bos'
+
+    if provider == 'anthropic':
+        if not api_key:
+            return None, 'Anthropic için API anahtarı bulunamadı.'
+        url = endpoint or 'https://api.anthropic.com/v1/messages'
+        sys_txt = ''
+        convo = []
+        for m in messages:
+            if m.get('role') == 'system':
+                sys_txt = str(m.get('content') or '')
+            else:
+                convo.append({'role': 'assistant' if m.get('role') == 'assistant' else 'user', 'content': m.get('content')})
+        try:
+            data = _post_json(
+                url,
+                {
+                    'model': model or 'claude-3-5-haiku-latest',
+                    'max_tokens': 2048,
+                    'system': sys_txt,
+                    'messages': convo,
+                },
+                timeout=45,
+                headers={'x-api-key': api_key, 'anthropic-version': '2023-06-01'},
+            )
+            blocks = data.get('content') or []
+            txt = ''.join(b.get('text', '') for b in blocks if isinstance(b, dict)).strip()
+            return (txt, None) if txt else (None, 'Seçili model yanıt döndürmedi.')
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return None, 'Girilen API anahtarı reddedildi veya yetkisiz.'
+            return None, 'Seçili yapay zeka servisi geçici olarak yanıt vermedi.'
+        except Exception as e:
+            return None, api_utils.safe_error_message(e, 'Seçili yapay zeka servisine bağlanılamadı.')
+
+    preset_urls = {
+        'openai': ('https://api.openai.com/v1/chat/completions', 'gpt-4o-mini'),
+        'openrouter': ('https://openrouter.ai/api/v1/chat/completions', 'openai/gpt-4o-mini'),
+        'groq': (cfg.GROQ_ENDPOINT, cfg.GROQ_TEXT_MODEL),
+        'deepseek': ('https://api.deepseek.com/v1/chat/completions', 'deepseek-chat'),
+        'mistral': ('https://api.mistral.ai/v1/chat/completions', 'mistral-small-latest'),
+    }
+    def_url, def_model = preset_urls.get(provider, ('', ''))
+    target_url = endpoint or def_url
+    target_model = model or def_model
+
+    ok_ep, clean_ep_or_err = api_utils.validate_custom_ai_endpoint(target_url)
+    if not ok_ep:
+        return None, clean_ep_or_err
+    target_url = clean_ep_or_err
+
+    if provider == 'custom':
+        low_url = target_url.lower()
+        if ':generatecontent' in low_url:
+            contents = _build_contents(message, parts=parts, history=history)
+            hdrs = {'x-goog-api-key': api_key} if api_key else {}
+            try:
+                data = _post_json(
+                    target_url,
+                    {
+                        'contents': contents,
+                        'systemInstruction': {'parts': [{'text': build_system_prompt(available_files, extra_context=extra_context)}]},
+                        'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2048},
+                    },
+                    timeout=45,
+                    headers=hdrs,
+                )
+                txt = _extract_text(data)
+                return (txt, None) if txt else (None, 'Özel uç nokta yanıt döndürmedi.')
+            except Exception as e:
+                return None, api_utils.safe_error_message(e, 'Özel uç noktaya bağlanılamadı.')
+        if not any(s in low_url for s in ('/chat/completions', '/completions', '/messages', '/responses', '/generate')):
+            target_url = target_url.rstrip('/') + '/chat/completions'
+
+    if not api_key and provider != 'custom':
+        return None, 'Seçili sağlayıcı için API anahtarı bulunamadı.'
+
+    hdrs = {}
+    if api_key:
+        hdrs['Authorization'] = 'Bearer ' + api_key
+    try:
+        data = _post_json(
+            target_url,
+            {
+                'model': target_model or 'gpt-4o-mini',
+                'messages': messages,
+                'temperature': 0.7,
+                'max_tokens': 2048,
+            },
+            timeout=45,
+            headers=hdrs or None,
+        )
+        choices = data.get('choices') or []
+        txt = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+        if not txt and isinstance(data.get('reply'), str):
+            txt = data['reply'].strip()
+        if not txt and isinstance(data.get('output_text'), str):
+            txt = data['output_text'].strip()
+        if txt:
+            return txt, None
+        return None, 'Özel AI uç noktası boş yanıt döndürdü.'
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return None, 'Özel AI API anahtarı reddedildi veya yetkisiz.'
+        return None, 'Özel AI uç noktası yanıt veremedi (HTTP %d).' % e.code
+    except Exception as e:
+        return None, api_utils.safe_error_message(e, 'Özel AI uç noktasına bağlanılamadı.')
+
+
+def generate_reply(message, parts=None, available_files=None, api_key=None, history=None, extra_context='', user_ai_config=None):
     """
-    Metin isteklerinde once ucretsiz/anahtarsiz acik uclari dener (Pollinations -> DDG -> DeepInfra/HF);
-    hepsi hata verirse son durak olarak Gemini API (gemini-4-hydrogen) zincirine gecer.
-    Multimodal (gorsel/ses/video/PDF) isteklerde dogrudan Gemini API kullanir.
+    Kullanici Ayarlar menusunden ozel bir saglayici/uc nokta secmisse once onu kullanir.
+    Varsayilan modda ise metin isteklerinde once ucretsiz/anahtarsiz acik uclari dener
+    (Pollinations -> DDG -> DeepInfra/HF); hepsi hata verirse son durak olarak Gemini API
+    (gemini-4-hydrogen) zincirine gecer.
+    Multimodal (gorsel/ses/video/PDF) isteklerde varsayilan modda Gemini API kullanir.
 
     Returns: (yanit_metni, hata_mesaji)
     """
     contents = _build_contents(message, parts=parts, history=history)
     if not contents:
         return None, 'Mesaj bos'
+
+    if (
+        isinstance(user_ai_config, dict)
+        and user_ai_config.get('apply_to_chat', True)
+        and str(user_ai_config.get('provider') or 'default').strip().lower() not in ('', 'default')
+    ):
+        return _try_user_custom_ai(
+            user_ai_config,
+            message,
+            parts=parts,
+            available_files=available_files,
+            history=history,
+            extra_context=extra_context,
+        )
 
     has_binary = any(
         isinstance(p, dict) and ('inline_data' in p or 'inlineData' in p)
@@ -546,7 +721,7 @@ def generate_reply(message, parts=None, available_files=None, api_key=None, hist
     return None, gem_err or free_err or 'Yanit alinamadi'
 
 
-def generate_reply_lite(message, parts=None, available_files=None, api_key=None, history=None, extra_context=''):
+def generate_reply_lite(message, parts=None, available_files=None, api_key=None, history=None, extra_context='', user_ai_config=None):
     """Hafif modelle yanit uretir."""
     return generate_reply(
         message,
@@ -555,6 +730,7 @@ def generate_reply_lite(message, parts=None, available_files=None, api_key=None,
         api_key=api_key,
         history=history,
         extra_context=extra_context,
+        user_ai_config=user_ai_config,
     )
 
 
@@ -1316,6 +1492,12 @@ def run_action_pipeline(action_spec, uploaded_files=None, device_id=None, userna
         if name == 'wa_bot_stop':
             from . import wa_bot
             res = wa_bot.action_stop(username_lower, params)
+            last_result = res
+            continue
+
+        if name == 'wa_bot_send_message':
+            from . import wa_bot
+            res = wa_bot.action_send_message(username_lower, params)
             last_result = res
             continue
 

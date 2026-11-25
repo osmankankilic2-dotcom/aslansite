@@ -3,6 +3,7 @@ import dns from 'node:dns';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { URL } from 'node:url';
@@ -29,14 +30,18 @@ const makeWASocket = typeof makeWASocketImport === 'function'
 const BLOB_API_VERSION = '12';
 const BLOB_MAGIC = Buffer.from('ASLANWA1', 'ascii');
 const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
+const CONTINUOUS_ACTIVE_MODE = process.env.WA_CONTINUOUS_ACTIVE !== '0';
 const DEFAULT_PAIR_WINDOW_MS = Math.max(15000, Number(process.env.WA_PAIR_WINDOW_MS || 180000));
-const DEFAULT_WAKE_MAX_MS = Math.max(20000, Number(process.env.WA_WAKE_MAX_MS || 110000));
+const DEFAULT_WAKE_MAX_MS = Math.max(20000, Number(process.env.WA_WAKE_MAX_MS || 240000));
 const DEFAULT_IDLE_SLEEP_MS = Math.max(1500, Number(process.env.WA_IDLE_SLEEP_MS || 8000));
 const DEFAULT_POST_REPLY_GRACE_MS = Math.max(1500, Number(process.env.WA_POST_REPLY_GRACE_MS || 15000));
 const ACTIVE_SLEEP_MS = Math.max(15000, Number(process.env.WA_ACTIVE_SLEEP_MS || 30000));
 const IDLE_SLEEP_INTERVAL_MS = Math.max(20000, Number(process.env.WA_IDLE_SLEEP_INTERVAL_MS || 60000));
 const DEEP_SLEEP_INTERVAL_MS = Math.max(30000, Number(process.env.WA_DEEP_SLEEP_INTERVAL_MS || 60000));
 const MIN_WAKE_GAP_MS = Math.max(5000, Number(process.env.WA_MIN_WAKE_GAP_MS || 20000));
+const SOCKET_HEARTBEAT_MS = Math.max(10000, Number(process.env.WA_HEARTBEAT_MS || 25000));
+const LEASE_STALE_MS = Math.max(30000, Number(process.env.WA_LEASE_STALE_MS || 55000));
+const RELAY_HANDOVER_GAP_MS = Math.max(100, Number(process.env.WA_RELAY_GAP_MS || 350));
 const MAX_RECENT_MSG_IDS = 80;
 const TMP_SESSION_ROOT = process.env.WA_TMP_DIR || path.join(os.tmpdir(), 'aslan_wa_sessions');
 
@@ -141,6 +146,82 @@ function resolveSelfWakeUrl() {
     return 'https://aslansite.vercel.app/api/wa_bridge/wa/wake';
 }
 
+function resolveFallbackKeepAliveUrl() {
+    return resolveSelfWakeUrl().replace(/\/api\/wa_bridge\/wa\/wake$/i, '/api/whatsapp/keep-alive');
+}
+
+export function isSessionEligibleForActiveRelay(sess) {
+    return Boolean(
+        sess &&
+        sess.userId &&
+        !sess.loggedOut &&
+        !sess.stopped &&
+        !(sess.config && sess.config.enabled === false) &&
+        ((sess.creds && sess.creds.registered) || (sess.authBox && sess.authBox.creds && sess.authBox.creds.registered))
+    );
+}
+
+export function evaluateWakeLeaseDecision(existingLease, opts = {}, nowMs = Date.now()) {
+    const force = Boolean(opts && opts.force);
+    const handover = Boolean(opts && opts.handover);
+    const chainToken = String((opts && opts.chainToken) || '').trim();
+    const hbTs = Number((existingLease && (existingLease.lastHeartbeatAt || existingLease.lastWakeAt)) || 0);
+    const leaseExp = Number((existingLease && existingLease.leaseExpiresAt) || 0);
+    const isFresh = Boolean(
+        existingLease &&
+        existingLease.activeToken &&
+        hbTs > 0 &&
+        (nowMs - hbTs) < LEASE_STALE_MS &&
+        (leaseExp === 0 || nowMs < leaseExp)
+    );
+
+    if (force) {
+        return { allow: true, reason: 'forced' };
+    }
+    if (chainToken) {
+        if (!existingLease || !existingLease.activeToken || existingLease.activeToken === chainToken || !isFresh) {
+            return { allow: true, reason: 'chain_valid' };
+        }
+        return { allow: false, reason: 'stale_chain' };
+    }
+    if (!handover && isFresh) {
+        return { allow: false, reason: 'active_relay_healthy' };
+    }
+    return { allow: true, reason: 'stale_or_missing_recover' };
+}
+
+async function triggerRelayHandover(payload = {}) {
+    const targetUrl = resolveSelfWakeUrl();
+    const token = resolveBridgeToken();
+    const delays = [0, 1000, 2500, 5000];
+    for (let i = 0; i < delays.length; i++) {
+        if (delays[i] > 0) await sleep(delays[i]);
+        try {
+            const wakeRes = await ipv4PostJson(
+                targetUrl,
+                payload,
+                { 'X-Worker-Token': token },
+                12000,
+            );
+            if (wakeRes && wakeRes.status >= 200 && wakeRes.status < 500) {
+                return true;
+            }
+        } catch (_) {}
+    }
+    try {
+        const fbRes = await ipv4Request(resolveFallbackKeepAliveUrl(), {
+            method: 'GET',
+            headers: {
+                'X-Vercel-Cron': '1',
+                'User-Agent': 'Aslan-AI-KeepAlive/1.0',
+            },
+            timeoutMs: 10000,
+        });
+        return Boolean(fbRes && fbRes.status >= 200 && fbRes.status < 500);
+    } catch (_) {}
+    return false;
+}
+
 function isAuthorizedRequest(request) {
     const expected = resolveBridgeToken();
     if (!expected) return true;
@@ -165,7 +246,7 @@ function jsonResponse(status, payload) {
     });
 }
 
-function ipv4Request(urlStr, options = {}) {
+function ipv4Request(urlStr, options = {}, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         let parsed;
         try {
@@ -199,6 +280,29 @@ function ipv4Request(urlStr, options = {}) {
             headers,
         };
         const req = mod.request(reqOpts, (res) => {
+            const statusCode = res.statusCode || 200;
+            const loc = res.headers && res.headers.location;
+            if (
+                loc &&
+                [301, 302, 303, 307, 308].includes(statusCode) &&
+                redirectCount < 3
+            ) {
+                res.resume();
+                try {
+                    const nextUrl = new URL(loc, urlStr);
+                    if (nextUrl.protocol === 'https:' || nextUrl.protocol === 'http:') {
+                        const nextOpts = Object.assign({}, options);
+                        if (statusCode === 303 || ((statusCode === 301 || statusCode === 302) && reqOpts.method === 'POST')) {
+                            nextOpts.method = 'GET';
+                            nextOpts.body = null;
+                        }
+                        ipv4Request(nextUrl.toString(), nextOpts, redirectCount + 1)
+                            .then(resolve)
+                            .catch(reject);
+                        return;
+                    }
+                } catch (_) {}
+            }
             const chunks = [];
             res.on('data', (c) => chunks.push(c));
             res.on('end', () => {
@@ -208,7 +312,7 @@ function ipv4Request(urlStr, options = {}) {
                 try {
                     json = JSON.parse(text);
                 } catch (_) {}
-                resolve({ status: res.statusCode || 200, headers: res.headers, buffer, text, json });
+                resolve({ status: statusCode, headers: res.headers, buffer, text, json });
             });
         });
         req.on('timeout', () => req.destroy(new Error('Request timeout')));
@@ -605,6 +709,236 @@ function normalizeRecentIds(arr) {
     return arr.map(String).filter(Boolean).slice(-MAX_RECENT_MSG_IDS);
 }
 
+function normalizeTurkishFold(s) {
+    return String(s || '')
+        .replace(/İ/g, 'i')
+        .replace(/I/g, 'ı')
+        .replace(/ı/g, 'i')
+        .replace(/Ş/gi, 's')
+        .replace(/Ğ/gi, 'g')
+        .replace(/Ü/gi, 'u')
+        .replace(/Ö/gi, 'o')
+        .replace(/Ç/gi, 'c')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+}
+
+function hydrateContacts(raw) {
+    const map = new Map();
+    const list = Array.isArray(raw) ? raw : [];
+    for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        const jid = String(item.jid || item.id || '').trim();
+        if (!jid || jid === 'status@broadcast') continue;
+        map.set(jid, {
+            jid,
+            name: String(item.name || item.subject || '').trim(),
+            notify: String(item.notify || '').trim(),
+            isGroup: Boolean(item.isGroup || item.is_group || jid.endsWith('@g.us')),
+            updatedAt: Number(item.updatedAt || Date.now()),
+        });
+    }
+    return map;
+}
+
+function serializeContacts(instance) {
+    const map = instance && instance.contacts instanceof Map ? instance.contacts : null;
+    if (!map) return [];
+    const arr = Array.from(map.values())
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+        .slice(0, 500);
+    return arr;
+}
+
+function upsertContactEntry(instance, entry) {
+    if (!instance) return;
+    if (!(instance.contacts instanceof Map)) instance.contacts = new Map();
+    if (!entry || typeof entry !== 'object') return;
+    const jid = String(entry.jid || entry.id || '').trim();
+    if (!jid || jid === 'status@broadcast') return;
+    const prev = instance.contacts.get(jid) || {};
+    const name = String(entry.name || entry.subject || prev.name || '').trim();
+    const notify = String(entry.notify || prev.notify || '').trim();
+    instance.contacts.set(jid, {
+        jid,
+        name,
+        notify,
+        isGroup: Boolean(entry.isGroup || entry.is_group || jid.endsWith('@g.us')),
+        updatedAt: Date.now(),
+    });
+    if (instance.contacts.size > 500) {
+        const sorted = serializeContacts(instance);
+        instance.contacts = hydrateContacts(sorted);
+    }
+}
+
+async function syncParticipatingGroups(instance, sock) {
+    if (!sock || typeof sock.groupFetchAllParticipating !== 'function') return;
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        if (groups && typeof groups === 'object') {
+            for (const [jid, meta] of Object.entries(groups)) {
+                if (!jid) continue;
+                upsertContactEntry(instance, {
+                    jid,
+                    name: (meta && meta.subject) || '',
+                    isGroup: true,
+                });
+            }
+        }
+    } catch (_) {}
+}
+
+function bindContactEvents(instance, sock, onDirty = null) {
+    if (!sock || !sock.ev) return;
+    sock.ev.on('contacts.upsert', (list) => {
+        for (const c of (list || [])) {
+            upsertContactEntry(instance, { jid: c.id || c.jid, name: c.name || c.verifiedName || '', notify: c.notify || '', isGroup: false });
+        }
+        if (onDirty) onDirty();
+    });
+    sock.ev.on('contacts.update', (list) => {
+        for (const c of (list || [])) {
+            upsertContactEntry(instance, { jid: c.id || c.jid, name: c.name || c.verifiedName || '', notify: c.notify || '', isGroup: false });
+        }
+        if (onDirty) onDirty();
+    });
+    sock.ev.on('chats.upsert', (list) => {
+        for (const c of (list || [])) {
+            const jid = c.id || '';
+            upsertContactEntry(instance, { jid, name: c.name || c.subject || '', isGroup: jid.endsWith('@g.us') });
+        }
+        if (onDirty) onDirty();
+    });
+    sock.ev.on('chats.update', (list) => {
+        for (const c of (list || [])) {
+            const jid = c.id || '';
+            if (c.name || c.subject) {
+                upsertContactEntry(instance, { jid, name: c.name || c.subject || '', isGroup: jid.endsWith('@g.us') });
+            }
+        }
+        if (onDirty) onDirty();
+    });
+    sock.ev.on('groups.upsert', (list) => {
+        for (const g of (list || [])) {
+            upsertContactEntry(instance, { jid: g.id, name: g.subject || '', isGroup: true });
+        }
+        if (onDirty) onDirty();
+    });
+    sock.ev.on('groups.update', (list) => {
+        for (const g of (list || [])) {
+            if (g && g.id && g.subject) {
+                upsertContactEntry(instance, { jid: g.id, name: g.subject, isGroup: true });
+            }
+        }
+        if (onDirty) onDirty();
+    });
+}
+
+function normalizePhoneTarget(rawTarget) {
+    const raw = String(rawTarget || '').trim();
+    if (!/^\+?[\d\s().-]{10,20}$/.test(raw)) return '';
+    let digits = raw.replace(/\D/g, '');
+    if (digits.length === 10 && digits.startsWith('5')) digits = '90' + digits;
+    else if (digits.length === 11 && digits.startsWith('05')) digits = '9' + digits;
+    return (digits.length >= 10 && digits.length <= 15) ? digits : '';
+}
+
+async function resolveTargetJid(instance, sock, rawTarget) {
+    const clean = String(rawTarget || '').trim();
+    if (!clean) return { ok: false, notFound: true, error: 'Hedef belirtilmedi.' };
+
+    if (clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) {
+        const hit = instance && instance.contacts ? instance.contacts.get(clean) : null;
+        return {
+            ok: true,
+            jid: clean,
+            target_label: (hit && (hit.name || hit.notify)) || clean,
+            is_group: clean.endsWith('@g.us'),
+        };
+    }
+
+    const digits = normalizePhoneTarget(clean);
+    if (digits) {
+        let jid = `${digits}@s.whatsapp.net`;
+        if (sock && typeof sock.onWhatsApp === 'function') {
+            try {
+                const res = await sock.onWhatsApp(digits);
+                if (Array.isArray(res) && res[0]) {
+                    if (res[0].exists === false) {
+                        return { ok: false, notFound: true, error: 'Bu numara WhatsApp üzerinde kayıtlı görünmüyor.' };
+                    }
+                    if (res[0].jid) jid = res[0].jid;
+                }
+            } catch (_) {}
+        }
+        const hit = instance && instance.contacts ? instance.contacts.get(jid) : null;
+        return {
+            ok: true,
+            jid,
+            target_label: (hit && (hit.name || hit.notify)) || `+${digits}`,
+            is_group: false,
+        };
+    }
+
+    if (sock) {
+        await syncParticipatingGroups(instance, sock);
+    }
+
+    const queryFold = normalizeTurkishFold(clean);
+    const entries = instance && instance.contacts instanceof Map
+        ? Array.from(instance.contacts.values())
+        : [];
+    const exactMatches = [];
+    const prefixMatches = [];
+    const subMatches = [];
+
+    for (const c of entries) {
+        const nFold = normalizeTurkishFold(c.name || '');
+        const pFold = normalizeTurkishFold(c.notify || '');
+        const names = [nFold, pFold].filter(Boolean);
+        if (!names.length) continue;
+        if (names.some((n) => n === queryFold)) {
+            exactMatches.push(c);
+        } else if (names.some((n) => n.startsWith(queryFold))) {
+            prefixMatches.push(c);
+        } else if (names.some((n) => n.includes(queryFold))) {
+            subMatches.push(c);
+        }
+    }
+
+    const bucket = exactMatches.length ? exactMatches : (prefixMatches.length ? prefixMatches : subMatches);
+    if (!bucket.length) {
+        return {
+            ok: false,
+            notFound: true,
+            error: `"${clean}" adıyla eşleşen bir kişi veya grup sohbeti bulunamadı. Telefon numarasını ülke koduyla yazabilirsiniz.`,
+        };
+    }
+    if (bucket.length > 1) {
+        return {
+            ok: false,
+            ambiguous: true,
+            candidates: bucket.slice(0, 6).map((c) => ({
+                jid: c.jid,
+                name: c.name || c.notify || c.jid,
+                is_group: Boolean(c.isGroup || String(c.jid).endsWith('@g.us')),
+            })),
+            error: `"${clean}" için birden fazla eşleşme bulundu. Lütfen tam adını veya numarasını belirtin.`,
+        };
+    }
+
+    const chosen = bucket[0];
+    return {
+        ok: true,
+        jid: chosen.jid,
+        target_label: chosen.name || chosen.notify || chosen.jid,
+        is_group: Boolean(chosen.isGroup || String(chosen.jid).endsWith('@g.us')),
+    };
+}
+
 function rememberMessageId(instance, msgId) {
     const cleanId = String(msgId || '').trim();
     if (!cleanId) return true;
@@ -717,10 +1051,36 @@ function findAutoReaction(textLower, reactions) {
     return '';
 }
 
+function isSafeCustomHttpsUrl(urlStr) {
+    try {
+        const s = String(urlStr || '').trim();
+        if (!s || s.length > 512) return false;
+        const u = new URL(s);
+        if (u.protocol !== 'https:') return false;
+        if (u.username || u.password) return false;
+        if (u.port && u.port !== '443' && u.port !== '8443') return false;
+        const host = String(u.hostname || '').toLowerCase().replace(/\.$/, '');
+        if (!host) return false;
+        if (
+            host === 'localhost' ||
+            host === 'metadata.google.internal' ||
+            host.endsWith('.local') ||
+            host.endsWith('.internal') ||
+            host.endsWith('.localhost')
+        ) {
+            return false;
+        }
+        if (net.isIP(host)) return false;
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 async function callCustomAi(aiCfg, userText, cfg) {
-    const apiKey = String(aiCfg.api_key || '').trim();
-    if (!apiKey) return '';
-    const provider = String(aiCfg.provider || 'openai').toLowerCase();
+    const provider = String((aiCfg && aiCfg.provider) || 'openai').toLowerCase();
+    const apiKey = String((aiCfg && aiCfg.api_key) || '').trim();
+    if (!apiKey && provider !== 'custom') return '';
     const sysPrompt = [
         'Sen kullanicinin WhatsApp asistanisin.',
         cfg.tone ? `Uslup: ${cfg.tone}.` : '',
@@ -733,7 +1093,12 @@ async function callCustomAi(aiCfg, userText, cfg) {
             const modelsToTry = Array.from(new Set([aiCfg.model || 'gemini-4-hydrogen', 'gemini-3.5-flash-lite']));
             for (const model of modelsToTry) {
                 try {
-                    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+                    const base = aiCfg.endpoint && isSafeCustomHttpsUrl(aiCfg.endpoint)
+                        ? aiCfg.endpoint.replace(/\/+$/, '')
+                        : 'https://generativelanguage.googleapis.com/v1beta/models';
+                    const url = base.toLowerCase().includes(':generatecontent')
+                        ? base
+                        : `${base}/${encodeURIComponent(model)}:generateContent`;
                     const res = await ipv4PostJson(url, {
                         contents: [{ role: 'user', parts: [{ text: userText }] }],
                         systemInstruction: { parts: [{ text: sysPrompt }] },
@@ -751,7 +1116,10 @@ async function callCustomAi(aiCfg, userText, cfg) {
         }
 
         if (provider === 'anthropic') {
-            const res = await ipv4PostJson('https://api.anthropic.com/v1/messages', {
+            const ep = aiCfg.endpoint && isSafeCustomHttpsUrl(aiCfg.endpoint)
+                ? aiCfg.endpoint
+                : 'https://api.anthropic.com/v1/messages';
+            const res = await ipv4PostJson(ep, {
                 model: aiCfg.model || 'claude-3-5-haiku-latest',
                 max_tokens: 600,
                 system: sysPrompt,
@@ -767,7 +1135,7 @@ async function callCustomAi(aiCfg, userText, cfg) {
             return '';
         }
 
-        let url = aiCfg.endpoint || 'https://api.openai.com/v1/chat/completions';
+        let url = 'https://api.openai.com/v1/chat/completions';
         let model = aiCfg.model || 'gpt-4o-mini';
         if (provider === 'groq') {
             url = aiCfg.endpoint || 'https://api.groq.com/openai/v1/chat/completions';
@@ -775,8 +1143,40 @@ async function callCustomAi(aiCfg, userText, cfg) {
         } else if (provider === 'openrouter') {
             url = aiCfg.endpoint || 'https://openrouter.ai/api/v1/chat/completions';
             model = aiCfg.model || 'openai/gpt-4o-mini';
+        } else if (provider === 'deepseek') {
+            url = aiCfg.endpoint || 'https://api.deepseek.com/v1/chat/completions';
+            model = aiCfg.model || 'deepseek-chat';
+        } else if (provider === 'mistral') {
+            url = aiCfg.endpoint || 'https://api.mistral.ai/v1/chat/completions';
+            model = aiCfg.model || 'mistral-small-latest';
+        } else if (provider === 'custom') {
+            url = String(aiCfg.endpoint || '').trim();
+            if (!isSafeCustomHttpsUrl(url)) return '';
+            const lowEp = url.toLowerCase();
+            if (lowEp.includes(':generatecontent')) {
+                const hdrs = apiKey ? { 'x-goog-api-key': apiKey } : {};
+                const gRes = await ipv4PostJson(url, {
+                    contents: [{ role: 'user', parts: [{ text: userText }] }],
+                    systemInstruction: { parts: [{ text: sysPrompt }] },
+                    generationConfig: { temperature: 0.7, maxOutputTokens: 600 },
+                }, hdrs, 25000);
+                const cand = gRes.data && gRes.data.candidates && gRes.data.candidates[0];
+                const parts = cand && cand.content && cand.content.parts;
+                if (Array.isArray(parts)) {
+                    const out = parts.map((p) => p.text || '').join('').trim();
+                    if (out) return out;
+                }
+                return '';
+            }
+            if (!['/chat/completions', '/completions', '/messages', '/responses', '/generate'].some((s) => lowEp.includes(s))) {
+                url = url.replace(/\/+$/, '') + '/chat/completions';
+            }
+        } else if (aiCfg.endpoint) {
+            url = aiCfg.endpoint;
         }
 
+        if (!isSafeCustomHttpsUrl(url)) return '';
+        const hdrs = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
         const res = await ipv4PostJson(url, {
             model,
             messages: [
@@ -785,11 +1185,14 @@ async function callCustomAi(aiCfg, userText, cfg) {
             ],
             temperature: 0.7,
             max_tokens: 600,
-        }, { Authorization: `Bearer ${apiKey}` }, 25000);
+        }, hdrs, 25000);
 
         const choices = res.data && res.data.choices;
         if (Array.isArray(choices) && choices[0] && choices[0].message && choices[0].message.content) {
             return String(choices[0].message.content).trim();
+        }
+        if (res.data && typeof res.data.reply === 'string') {
+            return res.data.reply.trim();
         }
     } catch (_) {}
     return '';
@@ -848,7 +1251,7 @@ async function evaluateIncomingMessage(instance, opts = {}) {
     }
 
     let replyText = ruleReply;
-    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && cfg.custom_ai.api_key) {
+    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && (cfg.custom_ai.api_key || (cfg.custom_ai.provider === 'custom' && cfg.custom_ai.endpoint))) {
         replyText = await callCustomAi(cfg.custom_ai, cleanText, cfg);
     }
     if (!replyText && cfg.default_reply) {
@@ -987,6 +1390,7 @@ function createBlobAuthBox(instance, initialSession = null) {
             messagesHandled: Number(instance.messagesHandled || 0),
             emptyWakeStreak: Number(instance.emptyWakeStreak || 0),
             recentMessageIds: normalizeRecentIds(instance.recentMessageIds),
+            contacts: serializeContacts(instance),
             reconnectCount: instance.reconnectCount || 0,
             pairingCode: instance.pairingCode || null,
             expiresAt: instance.expiresAt || null,
@@ -1157,6 +1561,9 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
         ? { mode: 'wake_cycle', maxWindowMs: options }
         : (options || {});
     const mode = opts.mode || 'wake_cycle';
+    const continuous = opts.continuous !== undefined
+        ? Boolean(opts.continuous)
+        : (CONTINUOUS_ACTIVE_MODE && mode !== 'pairing');
     const maxWindowMs = Math.max(5000, Number(opts.maxWindowMs || (mode === 'pairing' ? DEFAULT_PAIR_WINDOW_MS : DEFAULT_WAKE_MAX_MS)));
     const idleSleepMs = Math.max(1500, Number(opts.idleSleepMs || DEFAULT_IDLE_SLEEP_MS));
     const postReplyGraceMs = Math.max(1500, Number(opts.postReplyGraceMs || DEFAULT_POST_REPLY_GRACE_MS));
@@ -1169,6 +1576,7 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
         let finished = false;
         let windowClosing = false;
         let windowTimer = null;
+        let heartbeatTimer = null;
         let idleTimer = null;
         let openFallbackTimer = null;
         let inFlightMessages = 0;
@@ -1185,13 +1593,21 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
             finished = true;
             windowClosing = true;
             if (windowTimer) { clearTimeout(windowTimer); windowTimer = null; }
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
             clearIdleTimers();
 
-            if (!instance.loggedOut && !instance.stopped && instance.connected) {
+            if (inFlightMessages > 0) {
+                const waitDeadline = Date.now() + 6000;
+                while (inFlightMessages > 0 && Date.now() < waitDeadline) {
+                    await sleep(200);
+                }
+            }
+
+            if (!instance.loggedOut && !instance.stopped && (instance.connected || (authBox.creds && authBox.creds.registered))) {
                 instance.emptyWakeStreak = messagesHandledInCycle > 0
                     ? 0
                     : ((instance.emptyWakeStreak || 0) + 1);
-                instance.sleepState = 'sleeping';
+                instance.sleepState = continuous ? 'awake' : 'sleeping';
             } else if (instance.stopped || instance.loggedOut) {
                 instance.sleepState = 'idle';
             }
@@ -1204,14 +1620,12 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
 
             if (mode === 'pairing' && instance.connected && !instance.loggedOut && !instance.stopped) {
                 if (process.env.WA_SELF_WAKE_DISABLED !== '1' && process.env.VERCEL && process.env.WA_MOCK_MODE !== '1') {
-                    safeWaitUntil(
-                        ipv4PostJson(
-                            resolveSelfWakeUrl(),
-                            { user_id: instance.userId, force: true, hop: 0 },
-                            { 'X-Worker-Token': resolveBridgeToken() },
-                            8000,
-                        ).catch(() => {})
-                    );
+                    await triggerRelayHandover({
+                        user_id: instance.userId,
+                        force: true,
+                        handover: true,
+                        hop: 0,
+                    }).catch(() => {});
                 }
             }
 
@@ -1222,6 +1636,7 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
         };
 
         const scheduleIdleSleep = () => {
+            if (continuous) return;
             if (finished || windowClosing) return;
             if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
             if (mode === 'pairing' && !instance.connected) return;
@@ -1241,8 +1656,34 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
             return (rawTs * 1000) >= (Date.now() - 600000);
         };
 
-        const bindSocket = (sock) => {
+        let bindSocket;
+        const scheduleRelaySocketReconnect = (delayMs = 2000) => {
+            if (finished || windowClosing || instance.stopped || instance.loggedOut) return;
+            if (instance.reconnectTimer || instance.reconnecting) return;
+            instance.reconnecting = true;
+            instance.reconnectTimer = setTimeout(() => {
+                instance.reconnectTimer = null;
+                if (finished || windowClosing || instance.stopped || instance.loggedOut) {
+                    instance.reconnecting = false;
+                    return;
+                }
+                openRawSocket(instance, authBox)
+                    .then((nextSock) => {
+                        instance.reconnecting = false;
+                        bindSocket(nextSock);
+                    })
+                    .catch(() => {
+                        instance.reconnecting = false;
+                        scheduleRelaySocketReconnect(4000);
+                    });
+            }, Math.max(250, Number(delayMs) || 2000));
+        };
+
+        bindSocket = (sock) => {
             if (!sock || finished || instance.stopped) return;
+            bindContactEvents(instance, sock, () => {
+                authBox.flush(false).catch(() => {});
+            });
             sock.ev.on('creds.update', () => {
                 authBox.flush(true).catch(() => {});
             });
@@ -1253,6 +1694,13 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
                 if (!isNotify && !isAppend) return;
 
                 for (const m of ev.messages) {
+                    if (m && m.key && m.key.remoteJid && m.pushName && !m.key.fromMe) {
+                        upsertContactEntry(instance, {
+                            jid: m.key.remoteJid,
+                            notify: m.pushName,
+                            isGroup: String(m.key.remoteJid).endsWith('@g.us'),
+                        });
+                    }
                     if (isAppend && !isRecentAppendMsg(m)) continue;
                     if (!lightweightPreFilterMessage(instance, m)) continue;
                     inFlightMessages++;
@@ -1286,10 +1734,13 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
                     instance.sleepState = 'awake';
                     instance.connectedAt = instance.connectedAt || Date.now();
                     instance.lastKeepAliveAt = Date.now();
+                    instance.lastWakeAt = Date.now();
                     instance.pairingCode = null;
                     instance.updatedAt = Date.now();
-                    authBox.flush(true).catch(() => {});
-                    if (!pendingFlushed && !openFallbackTimer) {
+                    syncParticipatingGroups(instance, sock)
+                        .then(() => authBox.flush(true))
+                        .catch(() => authBox.flush(true).catch(() => {}));
+                    if (!continuous && !pendingFlushed && !openFallbackTimer) {
                         openFallbackTimer = setTimeout(() => {
                             openFallbackTimer = null;
                             pendingFlushed = true;
@@ -1307,12 +1758,17 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
                         ? new Boom(lastDisconnect.error).output?.statusCode
                         : 0;
                     const loggedOut = code === DisconnectReason.loggedOut;
+                    const connectionReplaced = code === (DisconnectReason.connectionReplaced || 440);
                     if (loggedOut) {
                         instance.connected = false;
                         instance.loggedOut = true;
                         instance.status = 'disconnected';
                         instance.sleepState = 'idle';
                         instance.updatedAt = Date.now();
+                        finishWindow();
+                        return;
+                    }
+                    if (connectionReplaced) {
                         finishWindow();
                         return;
                     }
@@ -1329,27 +1785,36 @@ function runSocketLifecycleWindow(instance, initialSock, authBox, options = {}) 
                         } else if (authBox.creds && authBox.creds.registered) {
                             instance.status = 'reconnecting';
                         }
-                        instance.reconnecting = true;
                         authBox.flush(true).catch(() => {});
-                        instance.reconnectTimer = setTimeout(() => {
-                            instance.reconnectTimer = null;
-                            if (finished || windowClosing || instance.stopped || instance.loggedOut) {
-                                instance.reconnecting = false;
-                                return;
-                            }
-                            openRawSocket(instance, authBox)
-                                .then((nextSock) => {
-                                    instance.reconnecting = false;
-                                    bindSocket(nextSock);
-                                })
-                                .catch(() => {
-                                    instance.reconnecting = false;
-                                });
-                        }, delayMs);
+                        scheduleRelaySocketReconnect(delayMs);
                     }
                 }
             });
         };
+
+        heartbeatTimer = setInterval(() => {
+            if (finished || windowClosing || instance.stopped || instance.loggedOut) {
+                if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+                return;
+            }
+            if (isSocketOpen(instance.sock)) {
+                pingSocket(instance.sock);
+                instance.lastKeepAliveAt = Date.now();
+                instance.lastWakeAt = Date.now();
+                if (typeof opts.onHeartbeat === 'function') {
+                    try { opts.onHeartbeat(); } catch (_) {}
+                }
+            } else if (
+                !instance.reconnectTimer &&
+                !instance.reconnecting &&
+                (instance.connected || (authBox.creds && authBox.creds.registered))
+            ) {
+                scheduleRelaySocketReconnect(1200);
+            }
+        }, SOCKET_HEARTBEAT_MS);
+        if (heartbeatTimer && typeof heartbeatTimer.unref === 'function') {
+            heartbeatTimer.unref();
+        }
 
         windowTimer = setTimeout(() => {
             finishWindow();
@@ -1383,10 +1848,13 @@ function makeBaseInstance(userId, phone = '', configInput = {}, existing = null)
         messagesHandled: Number(base.messagesHandled || 0),
         emptyWakeStreak: Number(base.emptyWakeStreak || 0),
         recentMessageIds: normalizeRecentIds(base.recentMessageIds),
+        contacts: hydrateContacts(base.contacts),
+        sentMessages: Array.isArray(base.sentMessages) ? base.sentMessages.slice(-40) : [],
         reconnectCount: base.reconnectCount || 0,
         pairingCode: base.pairingCode || null,
         expiresAt: base.expiresAt || null,
         sock: null,
+        creds: base.creds || null,
         authBox: base.authBox || null,
         stopped: false,
         lifecycleActive: Boolean(base.lifecycleActive),
@@ -1557,6 +2025,7 @@ async function getStatus(userId) {
                 recentMessageIds: normalizeRecentIds(remote.recentMessageIds || warm.recentMessageIds),
                 pairingCode: remote.pairingCode ?? warm.pairingCode,
                 expiresAt: remote.expiresAt ?? warm.expiresAt,
+                creds: remote.creds || warm.creds || null,
                 reconnectCount: Math.max(warm.reconnectCount || 0, remote.reconnectCount || 0),
                 configUpdatesCount: Math.max(warm.configUpdatesCount || 0, remote.configUpdatesCount || 0),
                 config: remTs > warmTs && remote.config ? defaultConfig(remote.config) : warm.config,
@@ -1564,15 +2033,59 @@ async function getStatus(userId) {
             }
             : warm;
         instances.set(cleanUid, chosen);
+        if (
+            process.env.WA_MOCK_MODE !== '1' &&
+            process.env.VERCEL &&
+            process.env.WA_SELF_WAKE_DISABLED !== '1' &&
+            CONTINUOUS_ACTIVE_MODE &&
+            isSessionEligibleForActiveRelay(chosen) &&
+            !chosen.lifecycleActive
+        ) {
+            try {
+                const lease = await loadWakeLease();
+                if (evaluateWakeLeaseDecision(lease, { force: false }).allow) {
+                    safeWaitUntil(runAutoWakeCycle({ targetUserId: cleanUid, force: false }));
+                }
+            } catch (_) {}
+        }
         return formatStatusResponse(chosen);
     }
 
     if (warm) {
+        if (
+            process.env.WA_MOCK_MODE !== '1' &&
+            process.env.VERCEL &&
+            process.env.WA_SELF_WAKE_DISABLED !== '1' &&
+            CONTINUOUS_ACTIVE_MODE &&
+            isSessionEligibleForActiveRelay(warm) &&
+            !warm.lifecycleActive
+        ) {
+            try {
+                const lease = await loadWakeLease();
+                if (evaluateWakeLeaseDecision(lease, { force: false }).allow) {
+                    safeWaitUntil(runAutoWakeCycle({ targetUserId: cleanUid, force: false }));
+                }
+            } catch (_) {}
+        }
         return formatStatusResponse(warm);
     }
 
     const hydrated = makeBaseInstance(cleanUid, remote.phone, remote.config, remote);
     instances.set(cleanUid, hydrated);
+    if (
+        process.env.WA_MOCK_MODE !== '1' &&
+        process.env.VERCEL &&
+        process.env.WA_SELF_WAKE_DISABLED !== '1' &&
+        CONTINUOUS_ACTIVE_MODE &&
+        isSessionEligibleForActiveRelay(hydrated)
+    ) {
+        try {
+            const lease = await loadWakeLease();
+            if (evaluateWakeLeaseDecision(lease, { force: false }).allow) {
+                safeWaitUntil(runAutoWakeCycle({ targetUserId: cleanUid, force: false }));
+            }
+        } catch (_) {}
+    }
     return formatStatusResponse(hydrated);
 }
 
@@ -1661,6 +2174,159 @@ async function stopBot(userId, logout = false) {
     return { success: true, status: inst.status, stopped: true };
 }
 
+function waitForSocketOpen(sock, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+        if (isSocketOpen(sock)) {
+            resolve();
+            return;
+        }
+        let settled = false;
+        const done = (fn, arg) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { sock.ev.off('connection.update', onUpd); } catch (_) {}
+            fn(arg);
+        };
+        const onUpd = (u) => {
+            if (!u) return;
+            if (u.connection === 'open') done(resolve);
+            else if (u.connection === 'close') done(reject, new Error('Oturum kapandı'));
+        };
+        const timer = setTimeout(() => {
+            if (isSocketOpen(sock)) done(resolve);
+            else done(reject, new Error('Bağlantı zaman aşımı'));
+        }, timeoutMs);
+        sock.ev.on('connection.update', onUpd);
+    });
+}
+
+async function getContacts(userId) {
+    const cleanUid = String(userId || '').trim();
+    if (!cleanUid) return [];
+    let inst = instances.get(cleanUid) || null;
+    if (!inst && process.env.WA_MOCK_MODE !== '1') {
+        const remote = await loadSavedSession(cleanUid);
+        if (remote) {
+            inst = makeBaseInstance(cleanUid, remote.phone, remote.config, remote);
+            instances.set(cleanUid, inst);
+        }
+    }
+    if (!inst || !(inst.contacts instanceof Map)) return [];
+    return serializeContacts(inst).map((c) => ({
+        jid: c.jid,
+        name: c.name || c.notify || c.jid,
+        notify: c.notify || '',
+        is_group: Boolean(c.isGroup || String(c.jid).endsWith('@g.us')),
+    }));
+}
+
+function setMockContacts(userId, contactsList = []) {
+    if (process.env.WA_MOCK_MODE !== '1') {
+        return { success: false, error: 'Devre dışı.' };
+    }
+    const cleanUid = String(userId || '').trim();
+    const inst = instances.get(cleanUid);
+    if (!inst) {
+        return { success: false, error: 'Oturum bulunamadı.' };
+    }
+    for (const c of (Array.isArray(contactsList) ? contactsList : [])) {
+        upsertContactEntry(inst, c);
+    }
+    return { success: true, count: inst.contacts.size };
+}
+
+async function sendDirectMessage(userId, target, message) {
+    const cleanUid = String(userId || '').trim();
+    const cleanTarget = String(target || '').trim();
+    const cleanMsg = String(message || '').trim();
+    if (!cleanUid) return { success: false, error: 'Kullanıcı kimliği gerekli.' };
+    if (!cleanTarget) return { success: false, error: 'Hedef kişi, grup veya numara belirtilmelidir.' };
+    if (!cleanMsg) return { success: false, error: 'Mesaj metni boş olamaz.' };
+
+    let inst = instances.get(cleanUid) || null;
+    let remote = null;
+    if (process.env.WA_MOCK_MODE !== '1') {
+        remote = await loadSavedSession(cleanUid);
+        if (!inst && remote) {
+            inst = makeBaseInstance(cleanUid, remote.phone, remote.config, remote);
+            instances.set(cleanUid, inst);
+        }
+    }
+
+    if (!inst || !inst.connected || inst.loggedOut || inst.stopped) {
+        return { success: false, error: 'Bağlı WhatsApp oturumu bulunamadı.' };
+    }
+
+    if (process.env.WA_MOCK_MODE === '1') {
+        const resolved = await resolveTargetJid(inst, null, cleanTarget);
+        if (!resolved.ok) {
+            return {
+                success: false,
+                error: resolved.error,
+                ambiguous: Boolean(resolved.ambiguous),
+                not_found: Boolean(resolved.notFound),
+                candidates: resolved.candidates || [],
+            };
+        }
+        const msgId = 'mock_' + crypto.randomBytes(6).toString('hex');
+        const sentRec = {
+            jid: resolved.jid,
+            target_label: resolved.target_label,
+            is_group: resolved.is_group,
+            message: cleanMsg,
+            message_id: msgId,
+            sentAt: Date.now(),
+        };
+        if (!Array.isArray(inst.sentMessages)) inst.sentMessages = [];
+        inst.sentMessages.push(sentRec);
+        inst.lastMessageAt = Date.now();
+        return Object.assign({ success: true, sent: true }, sentRec);
+    }
+
+    let sock = inst.sock;
+    let openedTempSocket = false;
+    const authBox = inst.authBox || createBlobAuthBox(inst, remote);
+    inst.authBox = authBox;
+    try {
+        if (!isSocketOpen(sock)) {
+            sock = await openRawSocket(inst, authBox);
+            openedTempSocket = true;
+            bindContactEvents(inst, sock);
+            await waitForSocketOpen(sock, 20000);
+        }
+        const resolved = await resolveTargetJid(inst, sock, cleanTarget);
+        if (!resolved.ok) {
+            await authBox.flush(true).catch(() => {});
+            return {
+                success: false,
+                error: resolved.error,
+                ambiguous: Boolean(resolved.ambiguous),
+                not_found: Boolean(resolved.notFound),
+                candidates: resolved.candidates || [],
+            };
+        }
+        const sentObj = await sock.sendMessage(resolved.jid, { text: cleanMsg });
+        inst.lastMessageAt = Date.now();
+        await authBox.flush(true).catch(() => {});
+        return {
+            success: true,
+            sent: true,
+            jid: resolved.jid,
+            target_label: resolved.target_label,
+            is_group: resolved.is_group,
+            message: cleanMsg,
+            message_id: String((sentObj && sentObj.key && sentObj.key.id) || ''),
+        };
+    } catch (_) {
+        return { success: false, error: 'Aslan AI WhatsApp mesajı gönderilemedi. Lütfen tekrar deneyin.' };
+    } finally {
+        if (openedTempSocket && !inst.lifecycleActive) {
+            closeSocketQuietly(inst);
+        }
+    }
+}
+
 function mockConnect(userId) {
     if (process.env.WA_MOCK_MODE !== '1') {
         return { success: false, error: 'Devre dışı.' };
@@ -1741,6 +2407,7 @@ async function runAutoWakeCycle(options = {}) {
     const cycleStartMs = Date.now();
     const targetUserId = String(options.targetUserId || '').trim();
     const force = Boolean(options.force);
+    const handover = Boolean(options.handover);
     const chainToken = String(options.chainToken || '').trim();
     const hop = Number(options.hop || 0);
 
@@ -1771,33 +2438,33 @@ async function runAutoWakeCycle(options = {}) {
     }
 
     const existingLease = await loadWakeLease();
-    if (!force) {
-        if (chainToken && existingLease && existingLease.activeToken && existingLease.activeToken !== chainToken) {
-            return { checked: 0, alive: 0, reconnected: 0, skipped: 'stale_chain' };
+    const leaseDecision = evaluateWakeLeaseDecision(existingLease, { force, handover, chainToken });
+    if (!leaseDecision.allow) {
+        if (leaseDecision.reason === 'active_relay_healthy') {
+            for (const inst of instances.values()) {
+                if (inst && !inst.stopped && !inst.loggedOut && isSocketOpen(inst.sock)) {
+                    pingSocket(inst.sock);
+                    inst.lastKeepAliveAt = Date.now();
+                    alive++;
+                }
+            }
         }
-        if (!chainToken && existingLease && existingLease.lastWakeAt && (Date.now() - existingLease.lastWakeAt) < MIN_WAKE_GAP_MS) {
-            return { checked: 0, alive: 0, reconnected: 0, skipped: 'min_gap' };
-        }
+        return { checked: 0, alive, reconnected: 0, skipped: leaseDecision.reason };
     }
 
     const cycleToken = crypto.randomBytes(8).toString('hex');
     await saveWakeLease({
         activeToken: cycleToken,
-        lastWakeAt: Date.now(),
+        lastWakeAt: cycleStartMs,
+        lastHeartbeatAt: cycleStartMs,
+        leaseExpiresAt: cycleStartMs + DEFAULT_WAKE_MAX_MS + 25000,
         nextDueAt: 0,
         hop,
+        mode: CONTINUOUS_ACTIVE_MODE ? 'continuous' : 'sleep_wake',
     });
 
     const allSessions = await listSavedActiveSessions();
-    const activeSessions = allSessions.filter((sess) => (
-        sess &&
-        sess.userId &&
-        !sess.loggedOut &&
-        !sess.stopped &&
-        Boolean(sess.connected) &&
-        !(sess.config && sess.config.enabled === false) &&
-        Boolean(sess.creds && sess.creds.registered)
-    ));
+    const activeSessions = allSessions.filter(isSessionEligibleForActiveRelay);
 
     if (!activeSessions.length) {
         return { checked: 0, alive: 0, reconnected: 0, sleeping: true, selfWakeScheduled: false };
@@ -1820,12 +2487,26 @@ async function runAutoWakeCycle(options = {}) {
             continue;
         }
         inst = makeBaseInstance(uid, sess.phone, sess.config, sess);
+        inst.connected = true;
+        inst.status = 'reconnecting';
         inst.reconnectCount = (sess.reconnectCount || 0) + 1;
         const authBox = createBlobAuthBox(inst, sess);
         inst.authBox = authBox;
         instances.set(uid, inst);
         reconnected++;
-        jobs.push(runSocketLifecycleWindow(inst, null, authBox, { mode: 'wake_cycle' }));
+        jobs.push(runSocketLifecycleWindow(inst, null, authBox, {
+            mode: 'wake_cycle',
+            continuous: CONTINUOUS_ACTIVE_MODE,
+            onHeartbeat: () => saveWakeLease({
+                activeToken: cycleToken,
+                lastWakeAt: cycleStartMs,
+                lastHeartbeatAt: Date.now(),
+                leaseExpiresAt: cycleStartMs + DEFAULT_WAKE_MAX_MS + 25000,
+                nextDueAt: 0,
+                hop,
+                mode: CONTINUOUS_ACTIVE_MODE ? 'continuous' : 'sleep_wake',
+            }).catch(() => {}),
+        }));
     }
 
     let totalHandled = 0;
@@ -1847,40 +2528,52 @@ async function runAutoWakeCycle(options = {}) {
     let selfWakeScheduled = false;
     if (process.env.WA_SELF_WAKE_DISABLED !== '1' && process.env.VERCEL) {
         const remainingCheck = await listSavedActiveSessions();
-        const stillHasActive = remainingCheck.some((s) => (
-            s && s.userId && !s.loggedOut && !s.stopped &&
-            Boolean(s.connected) && !(s.config && s.config.enabled === false) &&
-            Boolean(s.creds && s.creds.registered)
-        ));
+        const stillHasActive = remainingCheck.some(isSessionEligibleForActiveRelay);
         if (stillHasActive) {
-            let desiredSleepMs = totalHandled > 0
-                ? ACTIVE_SLEEP_MS
-                : (minEmptyStreak <= 6 ? IDLE_SLEEP_INTERVAL_MS : DEEP_SLEEP_INTERVAL_MS);
-            const elapsed = Date.now() - cycleStartMs;
-            const maxSleepBudget = Math.max(2000, 240000 - elapsed);
-            const sleepMs = Math.min(desiredSleepMs, maxSleepBudget);
             const nextToken = crypto.randomBytes(8).toString('hex');
-            await saveWakeLease({
-                activeToken: nextToken,
-                lastWakeAt: Date.now(),
-                nextDueAt: Date.now() + sleepMs,
-                hop: hop + 1,
-            });
-            selfWakeScheduled = true;
-            await sleep(sleepMs);
-            const latest = await loadWakeLease();
-            if (!latest || !latest.activeToken || latest.activeToken === nextToken) {
-                for (let attempt = 0; attempt < 2; attempt++) {
-                    try {
-                        const wakeRes = await ipv4PostJson(
-                            resolveSelfWakeUrl(),
-                            { chain_token: nextToken, hop: hop + 1 },
-                            { 'X-Worker-Token': resolveBridgeToken() },
-                            10000,
-                        );
-                        if (wakeRes && wakeRes.status >= 200 && wakeRes.status < 500) break;
-                    } catch (_) {}
-                    if (attempt === 0) await sleep(2000);
+            if (CONTINUOUS_ACTIVE_MODE) {
+                await saveWakeLease({
+                    activeToken: nextToken,
+                    lastWakeAt: Date.now(),
+                    lastHeartbeatAt: Date.now(),
+                    leaseExpiresAt: Date.now() + 35000,
+                    nextDueAt: Date.now() + RELAY_HANDOVER_GAP_MS,
+                    hop: hop + 1,
+                    mode: 'continuous',
+                });
+                await sleep(RELAY_HANDOVER_GAP_MS);
+                const latest = await loadWakeLease();
+                if (!latest || !latest.activeToken || latest.activeToken === nextToken) {
+                    selfWakeScheduled = await triggerRelayHandover({
+                        chain_token: nextToken,
+                        handover: true,
+                        force: false,
+                        hop: hop + 1,
+                    });
+                }
+            } else {
+                let desiredSleepMs = totalHandled > 0
+                    ? ACTIVE_SLEEP_MS
+                    : (minEmptyStreak <= 6 ? IDLE_SLEEP_INTERVAL_MS : DEEP_SLEEP_INTERVAL_MS);
+                const elapsed = Date.now() - cycleStartMs;
+                const maxSleepBudget = Math.max(2000, 240000 - elapsed);
+                const sleepMs = Math.min(desiredSleepMs, maxSleepBudget);
+                await saveWakeLease({
+                    activeToken: nextToken,
+                    lastWakeAt: Date.now(),
+                    lastHeartbeatAt: Date.now(),
+                    nextDueAt: Date.now() + sleepMs,
+                    hop: hop + 1,
+                    mode: 'sleep_wake',
+                });
+                selfWakeScheduled = true;
+                await sleep(sleepMs);
+                const latest = await loadWakeLease();
+                if (!latest || !latest.activeToken || latest.activeToken === nextToken) {
+                    selfWakeScheduled = await triggerRelayHandover({
+                        chain_token: nextToken,
+                        hop: hop + 1,
+                    });
                 }
             }
         }
@@ -1906,9 +2599,12 @@ function resolveSubRoute(url, bodyAction = '') {
             pair: '/wa/pair',
             config: '/wa/config',
             stop: '/wa/stop',
+            send: '/wa/send',
+            contacts: '/wa/contacts',
             'mock-connect': '/wa/mock-connect',
             'mock-disconnect': '/wa/mock-disconnect',
             'mock-incoming': '/wa/mock-incoming',
+            'mock-contacts': '/wa/mock-contacts',
         };
         if (map[bodyAction]) return map[bodyAction];
     }
@@ -1954,6 +2650,11 @@ export default {
                     const res = await getStatus(uid);
                     return jsonResponse(200, res);
                 }
+                if (route === '/wa/contacts') {
+                    const uid = url.searchParams.get('user_id') || '';
+                    const contacts = await getContacts(uid);
+                    return jsonResponse(200, { success: true, contacts });
+                }
                 return jsonResponse(404, { success: false, error: 'Bilinmeyen yol.' });
             }
 
@@ -1979,6 +2680,7 @@ export default {
                     safeWaitUntil(runAutoWakeCycle({
                         targetUserId: body.user_id || '',
                         force,
+                        handover: Boolean(body.handover),
                         chainToken: String(body.chain_token || ''),
                         hop: Number(body.hop || 0),
                     }));
@@ -2000,6 +2702,15 @@ export default {
                     const res = await stopBot(body.user_id, Boolean(body.logout));
                     return jsonResponse(200, res);
                 }
+                if (route === '/wa/send') {
+                    const res = await sendDirectMessage(body.user_id, body.target, body.message);
+                    return jsonResponse(res.success ? 200 : 400, res);
+                }
+                if (route === '/wa/contacts') {
+                    const uid = body.user_id || url.searchParams.get('user_id') || '';
+                    const contacts = await getContacts(uid);
+                    return jsonResponse(200, { success: true, contacts });
+                }
                 if (route === '/wa/mock-connect' && process.env.WA_MOCK_MODE === '1') {
                     const res = mockConnect(body.user_id);
                     return jsonResponse(res.success ? 200 : 400, res);
@@ -2010,6 +2721,10 @@ export default {
                 }
                 if (route === '/wa/mock-incoming' && process.env.WA_MOCK_MODE === '1') {
                     const res = await mockIncoming(body.user_id, body);
+                    return jsonResponse(res.success ? 200 : 400, res);
+                }
+                if (route === '/wa/mock-contacts' && process.env.WA_MOCK_MODE === '1') {
+                    const res = setMockContacts(body.user_id, body.contacts);
                     return jsonResponse(res.success ? 200 : 400, res);
                 }
                 return jsonResponse(404, { success: false, error: 'Bilinmeyen yol.' });

@@ -24,7 +24,11 @@ function applyInitialTabFromUrl() {
         var params = new URLSearchParams(window.location.search || '');
         var tab = params.get('tab');
         if (tab === 'media') tab = 'ai';
-        if (tab === 'tts' || tab === 'ai' || tab === 'legal') {
+        if (tab === 'legal') {
+            openLegal('privacy');
+            return;
+        }
+        if (tab === 'tts' || tab === 'ai' || tab === 'settings') {
             switchTab(tab);
         }
     } catch (e) {}
@@ -39,6 +43,8 @@ function bindUiEvents() {
             if (target.id === 'cookie-modal') closeCookieManager();
             else if (target.id === 'auth-modal') closeAuthModal();
             else if (target.id === 'pwa-ios-modal') closePwaIosModal();
+            else if (target.id === 'legal-modal') closeLegalModal();
+            else if (target.id === 'delete-account-modal') closeDeleteAccountModal();
             return;
         }
 
@@ -83,6 +89,10 @@ function bindUiEvents() {
             case 'confirm-wa-connected': confirmWaConnected(actEl); break;
             case 'show-legal': showLegalPage(actEl.getAttribute('data-page'), actEl); break;
             case 'open-legal': openLegal(actEl.getAttribute('data-page')); break;
+            case 'close-legal-modal': closeLegalModal(); break;
+            case 'reset-ai-settings': if (typeof resetAiSettingsToDefault === 'function') resetAiSettingsToDefault(); break;
+            case 'open-delete-account-modal': if (typeof openDeleteAccountModal === 'function') openDeleteAccountModal(); break;
+            case 'close-delete-account-modal': if (typeof closeDeleteAccountModal === 'function') closeDeleteAccountModal(); break;
             case 'copy-code': copyCodeBlock(actEl); break;
             default: break;
         }
@@ -93,11 +103,16 @@ function bindUiEvents() {
             closeCookieManager();
             closeAuthModal();
             closePwaIosModal();
+            closeLegalModal();
+            if (typeof closeDeleteAccountModal === 'function') closeDeleteAccountModal();
         }
     });
 
     if ($('form-login')) $('form-login').addEventListener('submit', submitLogin);
     if ($('form-register')) $('form-register').addEventListener('submit', submitRegister);
+    if ($('form-settings-ai')) $('form-settings-ai').addEventListener('submit', saveAiSettings);
+    if ($('settings-ai-provider')) $('settings-ai-provider').addEventListener('change', function () { onSettingsProviderChange(false); });
+    if ($('form-delete-account')) $('form-delete-account').addEventListener('submit', confirmDeleteAccount);
 
     if ($('login-username')) $('login-username').addEventListener('input', clearAuthError);
     if ($('login-password')) $('login-password').addEventListener('input', clearAuthError);
@@ -144,6 +159,7 @@ async function initApp() {
                     saveStoredAuth(me.user, state.authToken);
                     if (me.quota) applyQuotaSnapshot(me.quota);
                     if (typeof loadSavedChats === 'function') loadSavedChats();
+                    if (typeof loadAiSettings === 'function') loadAiSettings();
                 } else {
                     saveStoredAuth(null, '');
                 }
@@ -156,7 +172,7 @@ async function initApp() {
     await syncConsentFromServer();
 
     try {
-        var hRes = await fetch('/api/health');
+        var hRes = await apiFetch('/api/health', { method: 'GET' });
         var dot = $('health-dot');
         var txt = $('health-text');
         if (hRes.ok) {
@@ -187,7 +203,11 @@ function initSilentKeepAlive() {
                 method: 'GET',
                 cache: 'no-store',
                 credentials: 'omit',
-                keepalive: true
+                keepalive: true,
+                headers: {
+                    'X-Device-Id': getDeviceId(),
+                    'X-Requested-With': 'AslanWeb'
+                }
             }).catch(function () {});
         } catch (e) {}
     }
@@ -196,7 +216,17 @@ function initSilentKeepAlive() {
 
     try {
         document.addEventListener('visibilitychange', function () {
-            if (!document.hidden && (Date.now() - lastPingAt) >= 55000) {
+            if (!document.hidden && (Date.now() - lastPingAt) >= 30000) {
+                sendSilentPing();
+            }
+        });
+        window.addEventListener('online', function () {
+            if ((Date.now() - lastPingAt) >= 15000) {
+                sendSilentPing();
+            }
+        });
+        window.addEventListener('focus', function () {
+            if (!document.hidden && (Date.now() - lastPingAt) >= 30000) {
                 sendSilentPing();
             }
         });
@@ -221,6 +251,7 @@ document.addEventListener('DOMContentLoaded', function () {
     updatePasswordChecklist();
     renderSessionMediaBar();
     bindUiEvents();
+    if (typeof initMobileViewportSync === 'function') initMobileViewportSync();
     applyInitialTabFromUrl();
     initApp();
     initSilentKeepAlive();

@@ -86,6 +86,9 @@ function switchTab(name, btn) {
         targetBtn.classList.add('active');
         targetBtn.setAttribute('aria-selected', 'true');
     }
+    if (document.body) {
+        document.body.classList.toggle('chat-tab-active', name === 'ai');
+    }
     sfx('click');
 }
 
@@ -125,9 +128,26 @@ function showLegalPage(pageId, btn) {
 }
 
 function openLegal(pageId) {
-    switchTab('legal');
-    showLegalPage(pageId);
-    try {
-        window.scrollTo({ top: 0, behavior: state.powerMode === 'eco' ? 'auto' : 'smooth' });
-    } catch (e) {}
+    var modal = $('legal-modal');
+    if (modal) modal.classList.add('open');
+    showLegalPage(pageId || 'privacy');
+}
+
+function closeLegalModal() {
+    var modal = $('legal-modal');
+    if (modal) modal.classList.remove('open');
+}
+
+function initMobileViewportSync() {
+    var vv = window.visualViewport;
+    if (!vv || !document.documentElement) return;
+    function updateKbOffset() {
+        try {
+            var diff = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+            document.documentElement.style.setProperty('--kb-offset', diff + 'px');
+        } catch (e) {}
+    }
+    vv.addEventListener('resize', updateKbOffset);
+    vv.addEventListener('scroll', updateKbOffset);
+    updateKbOffset();
 }

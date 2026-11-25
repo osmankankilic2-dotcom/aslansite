@@ -4,19 +4,27 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Aslan AI — Akıllı Asistan, Ses &amp; Medya Stüdyosu</title>
-    <meta name="description" content="Aslan AI: Türkçe ve İngilizce seslendirme, çok yönlü yapay zeka asistanı, görsel üretimi ve akıllı medya işleme platformu.">
+    <meta name="description" content="Aslan AI: Türkçe ve İngilizce seslendirme, çok yönlü yapay zeka asistanı, görsel üretimi, akıllı medya işleme ve otonom WhatsApp bot yönetimi platformu.">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="googlebot" content="index, follow">
+    <link rel="canonical" href="https://aslansite.vercel.app/">
     <meta name="theme-color" content="#090b10">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Aslan AI">
     <meta property="og:type" content="website">
+    <meta property="og:url" content="https://aslansite.vercel.app/">
+    <meta property="og:site_name" content="Aslan AI">
     <meta property="og:title" content="Aslan AI — Ses, Yapay Zeka ve Medya Stüdyosu">
     <meta property="og:description" content="Metinden sese dönüştürme, Aslan AI çok yönlü asistan, görsel üretimi ve akıllı medya işleme araçları.">
+    <meta property="og:image" content="https://aslansite.vercel.app/assets/logo-banner.png">
     <meta property="og:locale" content="tr_TR">
-    <meta name="twitter:card" content="summary">
+    <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Aslan AI">
     <meta name="twitter:description" content="Ses Stüdyosu · Aslan AI Asistan · Görsel &amp; Medya Stüdyosu">
+    <meta name="twitter:image" content="https://aslansite.vercel.app/assets/logo-banner.png">
+    <!-- __GOOGLE_HEAD_TAGS__ -->
     <link rel="icon" type="image/png" href="/assets/favicon.png">
     <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.json">
@@ -146,6 +154,25 @@
     </div>
 </div>
 
+<!-- HESAP KALICI SILME ONAY MODALI -->
+<div id="delete-account-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
+    <div class="modal-card">
+        <div class="modal-head">
+            <h3 id="delete-account-title">⚠️ Hesabı Kalıcı Olarak Sil</h3>
+            <button type="button" class="modal-close" aria-label="Kapat" data-action="close-delete-account-modal">×</button>
+        </div>
+        <p class="hint mt-0">Bu işlem geri alınamaz. Hesabınız, kayıtlı sohbet geçmişiniz, özel yapay zeka ayarlarınız ve bağlı WhatsApp bot oturumunuz kalıcı olarak silinecektir.</p>
+        <form id="form-delete-account" novalidate>
+            <label for="delete-account-password">Onay için mevcut şifrenizi girin:</label>
+            <input type="password" id="delete-account-password" autocomplete="current-password" required placeholder="Şifreniz...">
+            <div class="btn-row mt-15">
+                <button type="button" class="action-btn secondary" data-action="close-delete-account-modal">Vazgeç</button>
+                <button type="submit" id="btn-confirm-delete-account" class="action-btn danger">🗑️ Hesabımı Kalıcı Olarak Sil</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- IOS PWA KURULUM MODALI -->
 <div id="pwa-ios-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pwa-ios-title">
     <div class="modal-card">
@@ -187,167 +214,277 @@
         </div>
     </header>
 
-    <div class="tabs" role="tablist" aria-label="Ana Modüller">
+    <nav class="tabs" role="tablist" aria-label="Ana Modüller">
         <button class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="panel-tts" data-tab="tts" data-action="switch-tab">🎙️ Ses</button>
         <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-ai" data-tab="ai" data-action="switch-tab">🤖 Aslan AI</button>
-        <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-legal" data-tab="legal" data-action="switch-tab">⚖️ Yasal</button>
-    </div>
+        <button class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="panel-settings" data-tab="settings" data-action="switch-tab">⚙️ Ayarlar</button>
+    </nav>
 
-    <!-- SES STÜDYOSU -->
-    <div id="panel-tts" class="card active" role="tabpanel">
-        <h3>🎙️ Aslan AI Ses Stüdyosu</h3>
-        <p class="hint mt-0">Metni doğal Türkçe veya İngilizce sese dönüştürün, hız/ton ayarlayın, Aslan AI ile sesle yönetin ve MP3 olarak indirin.</p>
+    <main id="main-content">
+        <!-- SES STÜDYOSU -->
+        <section id="panel-tts" class="card active" role="tabpanel" aria-label="Ses Stüdyosu">
+            <h3>🎙️ Aslan AI Ses Stüdyosu</h3>
+            <p class="hint mt-0">Metni doğal Türkçe veya İngilizce sese dönüştürün, hız/ton ayarlayın, Aslan AI ile sesle yönetin ve MP3 olarak indirin.</p>
 
-        <div id="tts-auth-lock" class="auth-lock-box">
-            <img src="/assets/logo-mark.png" alt="Aslan AI Kilit">
-            <h4>🔒 Aslan AI Ses Stüdyosu Üyelere Özeldir</h4>
-            <p>Aslan AI Ses Stüdyosu özelliğini kullanabilmek için lütfen giriş yapın veya ücretsiz hesabınızı oluşturun.</p>
-            <div class="auth-lock-actions">
-                <button type="button" class="action-btn" data-action="open-auth" data-mode="login" data-return-tab="tts">🔑 Giriş Yap</button>
-                <button type="button" class="action-btn secondary" data-action="open-auth" data-mode="register" data-return-tab="tts">📝 Kayıt Ol</button>
+            <div id="tts-auth-lock" class="auth-lock-box">
+                <img src="/assets/logo-mark.png" alt="Aslan AI Kilit">
+                <h4>🔒 Aslan AI Ses Stüdyosu Üyelere Özeldir</h4>
+                <p>Aslan AI Ses Stüdyosu özelliğini kullanabilmek için lütfen giriş yapın veya ücretsiz hesabınızı oluşturun.</p>
+                <div class="auth-lock-actions">
+                    <button type="button" class="action-btn" data-action="open-auth" data-mode="login" data-return-tab="tts">🔑 Giriş Yap</button>
+                    <button type="button" class="action-btn secondary" data-action="open-auth" data-mode="register" data-return-tab="tts">📝 Kayıt Ol</button>
+                </div>
             </div>
+
+            <div id="tts-workspace" class="is-hidden">
+                <label for="tts-text">Metin:</label>
+                <textarea id="tts-text" rows="4" maxlength="5000" placeholder="Seslendirilecek metni yazın..."></textarea>
+                <div class="char-row">
+                    <span id="tts-char-count">0 / 5000 karakter</span>
+                    <button type="button" class="action-btn small secondary" data-action="clear-tts">Temizle</button>
+                </div>
+
+                <label for="tts-voice">Ses Karakteri:</label>
+                <select id="tts-voice">
+                    <option value="tr-TR-AhmetNeural">Ahmet (Erkek · Türkçe)</option>
+                    <option value="tr-TR-EmelNeural">Emel (Kadın · Türkçe)</option>
+                    <option value="en-US-AndrewNeural">Andrew (Male · English)</option>
+                    <option value="en-US-AvaNeural">Ava (Female · English)</option>
+                </select>
+
+                <div class="slider-grid">
+                    <div>
+                        <label for="tts-rate">Konuşma Hızı <span id="tts-rate-val">+0%</span></label>
+                        <input type="range" id="tts-rate" min="-40" max="60" step="5" value="0">
+                    </div>
+                    <div>
+                        <label for="tts-pitch">Ses Tonu <span id="tts-pitch-val">+0Hz</span></label>
+                        <input type="range" id="tts-pitch" min="-20" max="20" step="2" value="0">
+                    </div>
+                    <div class="flex-end">
+                        <button type="button" class="action-btn small secondary w-full" data-action="reset-tts-sliders">↺ Varsayılana Sıfırla</button>
+                    </div>
+                </div>
+
+                <button id="btn-speak" class="action-btn" type="button" data-action="generate-audio">Sesi Oluştur ve Çal</button>
+
+                <div id="audio-box" class="is-hidden mt-15">
+                    <div class="flex-between">
+                        <span class="hint mt-0">Oluşturulan Ses</span>
+                        <span class="pill-badge" id="tts-engine-badge">Aslan AI</span>
+                    </div>
+                    <audio id="player" controls class="w-full"></audio>
+                    <div class="btn-row">
+                        <a id="dl-link" class="action-btn success" download="aslan_ses.mp3" href="#">⬇️ İndir (.mp3)</a>
+                        <button class="action-btn accent2 small btn-row-mt" type="button" data-action="copy-tts-link">🔗 Bağlantı Kopyala</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ASLAN AI -->
+        <section id="panel-ai" class="card chat-panel-clean" role="tabpanel" aria-label="Aslan AI Sohbet">
+            <div id="ai-auth-lock" class="auth-lock-box">
+                <img src="/assets/logo-mark.png" alt="Aslan AI Kilit">
+                <h4>🔒 Aslan AI'ya Erişim İçin Giriş Yapın</h4>
+                <p>Yapay zeka sohbeti ve görsel üretimi yalnızca kayıtlı kullanıcılara açıktır. Kullanım haklarınız doğrudan hesabınızda kalıcı olarak saklanır.</p>
+                <div class="auth-lock-actions">
+                    <button type="button" class="action-btn" data-action="open-auth" data-mode="login" data-return-tab="ai">🔑 Giriş Yap</button>
+                    <button type="button" class="action-btn secondary" data-action="open-auth" data-mode="register" data-return-tab="ai">📝 Kayıt Ol</button>
+                </div>
+            </div>
+
+            <div id="ai-workspace" class="is-hidden chat-workspace-clean">
+                <div class="chat-topbar">
+                    <div class="chat-topbar-left">
+                        <button type="button" class="chip-btn" id="btn-toggle-history" data-action="toggle-history">🕘 Sohbetler <span id="history-count-badge"></span></button>
+                        <button type="button" class="chip-btn" data-action="new-chat">+ Yeni</button>
+                        <button type="button" class="chip-btn" data-action="open-image-studio">🎨 Görsel</button>
+                        <button type="button" class="chip-btn" data-action="toggle-subpanel" data-target="ai-commands">⚡ Komutlar</button>
+                    </div>
+                    <div class="chat-topbar-right">
+                        <span class="quota-pill">AI <strong class="quota-count" id="quota-display">--/5</strong></span>
+                        <span class="quota-pill">Görsel <strong id="image-quota-display">--/2</strong></span>
+                        <span class="quota-pill">Bot <strong id="wa-quota-display">--/10</strong></span>
+                    </div>
+                </div>
+
+                <!-- 30 Gunluk Sohbet Gecmisi ve Sabitleme (En fazla 2 sohbet) -->
+                <div class="sub-panel history-drawer" id="chat-history-drawer">
+                    <div class="history-head">
+                        <strong>Sohbet Geçmişi (30 Gün)</strong>
+                        <span class="pin-limit-badge" id="pinned-count-badge">Sabitli: 0/2</span>
+                    </div>
+                    <p class="history-privacy-note">Sohbetleriniz model eğitimi için değil, yalnızca kaldığınız yerden devam etmeniz için 30 gün saklanır. En fazla 2 sohbeti silinmemek üzere sabitleyebilirsiniz.</p>
+                    <div class="history-list" id="chat-history-list"></div>
+                </div>
+
+                <!-- Medya & Ses Hizli Komutlari -->
+                <div class="sub-panel" id="ai-commands">
+                    <label>Hızlı Komutlar:</label>
+                    <div class="btn-row" id="ai-command-row">
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görselin üzerine 'ASLAN' yazısını ekle">📝 Yazı Ekle</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görsele sinematik siyah beyaz filtre uygula">🎨 Filtre Uygula</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="İki farklı aslan görseli üret, bunları birleştirip videoya dönüştür">🎞️ 2 Görsel → Video</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Videodan sesi çıkar">🎧 Ses Çıkar</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Videoyu 5 saniye kırp">✂️ Videoyu Kırp</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Sesi arka plan gürültüsünden temizle">🔇 Sesi Temizle</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Fotoğraflardan müzikli video oluştur">🎵 Müzikli Slayt</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Aslan AI'ya hoş geldiniz metnini Emel sesiyle oku">🔊 Sesli Oku</button>
+                        <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Sesli okumayı durdur">⏹️ Okumayı Durdur</button>
+                    </div>
+                </div>
+
+                <!-- Görsel Üretim Stüdyosu -->
+                <div class="sub-panel" id="image-studio">
+                    <label for="image-prompt">Görsel açıklaması (en fazla 1000 karakter):</label>
+                    <textarea id="image-prompt" rows="2" maxlength="1000" placeholder="Örn: 'kırmızı sibernetik aslan logosu, metalik zemin, 4K'"></textarea>
+                    <div class="btn-row">
+                        <button class="action-btn accent2" type="button" id="btn-generate-image" data-action="generate-image">🎨 Görsel Üret</button>
+                    </div>
+                    <p class="hint">Kullanıcı başına aylık toplam 2 görsel üretim hakkınız hesabınızda tutulur (yeni ay başladığında yenilenir).</p>
+                </div>
+
+                <div class="chat-box" id="chat-box" aria-live="polite">
+                    <div class="msg bot"><div class="md-body"><p>Merhaba, ben Aslan AI. Size nasıl yardımcı olabilirim?</p></div></div>
+                </div>
+
+                <!-- Sabit Alt Mesaj Dock (Mobil %100 uyumlu + Sticky/Fixed) -->
+                <div class="composer-dock" id="composer-dock">
+                    <div class="session-media-bar is-hidden" id="session-media-bar">
+                        <span class="session-media-title">📎 Aktif Medya Bağlamı:</span>
+                        <div class="session-media-chips" id="session-media-chips"></div>
+                        <button type="button" class="session-media-clear" id="btn-session-media-clear" data-action="clear-session-media">Temizle</button>
+                    </div>
+
+                    <div class="attach-tray" id="attach-tray"></div>
+
+                    <!-- Alt Mesaj Cubugu (Sagdan Sola: Gonder <- Mikrofon <- Mesaj Kutusu <- Dosya Ekle) -->
+                    <div class="input-row chat-composer">
+                        <button class="tool-btn attach-btn" type="button" id="btn-attach" title="Dosya ekle (görsel/video/ses/belge)" aria-label="Dosya seç ve ekle" data-action="trigger-ai-file">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        </button>
+                        <textarea id="ai-input" rows="1" maxlength="8000" placeholder="Aslan AI'ya bir mesaj yazın..."></textarea>
+                        <button class="tool-btn mic-btn" type="button" id="btn-mic" title="Sesli dikte (başlat / durdur)" aria-label="Sesli mesajı metne çevir" aria-pressed="false" data-action="toggle-record">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                        </button>
+                        <button id="btn-ai" class="send-btn" type="button" title="Gönder" aria-label="Gönder" data-action="send-ai">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <input type="file" id="ai-file" multiple hidden accept="image/*,video/*,audio/*,application/pdf,.txt,.md,.csv,.json">
+            </div>
+        </section>
+
+        <!-- AYARLAR MENÜSÜ (AI Sağlayıcı, Özel Uç Nokta & Hesap Yönetimi) -->
+        <section id="panel-settings" class="card" role="tabpanel" aria-label="Ayarlar">
+            <h3>⚙️ Ayarlar</h3>
+            <p class="hint mt-0">Hem site içi Aslan AI sohbeti hem de bağlı WhatsApp botunuz için yapay zeka sağlayıcısı, model, özel uç nokta ve hesap ayarlarınızı yönetin.</p>
+
+            <div id="settings-auth-lock" class="auth-lock-box">
+                <img src="/assets/logo-mark.png" alt="Aslan AI Ayarlar Kilit">
+                <h4>🔒 Ayarlar İçin Giriş Yapın</h4>
+                <p>Özel yapay zeka sağlayıcısı, model, anahtar ve hesap yönetimi ayarlarınızı kaydetmek için hesabınıza giriş yapın.</p>
+                <div class="auth-lock-actions">
+                    <button type="button" class="action-btn" data-action="open-auth" data-mode="login" data-return-tab="settings">🔑 Giriş Yap</button>
+                    <button type="button" class="action-btn secondary" data-action="open-auth" data-mode="register" data-return-tab="settings">📝 Kayıt Ol</button>
+                </div>
+            </div>
+
+            <div id="settings-workspace" class="is-hidden">
+                <div class="settings-section">
+                    <div class="flex-between">
+                        <h4>🤖 Yapay Zeka Sağlayıcısı ve Modeli</h4>
+                        <span class="pill-badge" id="settings-sync-status">Aslan AI Varsayılan</span>
+                    </div>
+                    <p class="hint mt-0">Seçtiğiniz sağlayıcı ve model kaydedildiğinde hem Aslan AI sohbetinde hem de bağlı WhatsApp botunuzda otonom olarak güncellenir.</p>
+
+                    <form id="form-settings-ai" novalidate>
+                        <label for="settings-ai-provider">Yapay Zeka Sağlayıcısı</label>
+                        <select id="settings-ai-provider">
+                            <option value="default">Aslan AI (Varsayılan Ücretsiz)</option>
+                            <option value="gemini">Google Gemini</option>
+                            <option value="custom">Özel Sağlayıcı / Özel Uç Nokta (Custom Endpoint)</option>
+                        </select>
+
+                        <div id="settings-custom-endpoint-wrap" class="is-hidden">
+                            <label for="settings-ai-endpoint">Özel Sağlayıcı Adresi (HTTPS Endpoint URL)</label>
+                            <input type="url" id="settings-ai-endpoint" maxlength="512" placeholder="https://ornek-servis.com/v1/chat/completions">
+                            <p class="hint">Güvenlik nedeniyle yalnızca geçerli genel HTTPS adresleri kabul edilir.</p>
+                        </div>
+
+                        <label for="settings-ai-model">Model Adı</label>
+                        <input type="text" id="settings-ai-model" maxlength="128" placeholder="Örn: gemini-4-hydrogen">
+
+                        <div id="settings-apikey-wrap">
+                            <div class="flex-between mt-10">
+                                <label for="settings-ai-apikey" class="mt-0">API Anahtarı</label>
+                                <span class="hint mt-0" id="settings-apikey-status">Kayıtlı anahtar yok</span>
+                            </div>
+                            <input type="password" id="settings-ai-apikey" autocomplete="off" placeholder="Anahtarınızı girin (şifrelenerek saklanır)...">
+                            <label class="settings-check mt-10">
+                                <input type="checkbox" id="settings-clear-apikey">
+                                <span>Kayıtlı anahtarı temizle</span>
+                            </label>
+                        </div>
+
+                        <div class="settings-scope-grid">
+                            <label class="settings-check">
+                                <input type="checkbox" id="settings-apply-chat" checked>
+                                <span>Site içi Aslan AI sohbetinde kullan</span>
+                            </label>
+                            <label class="settings-check">
+                                <input type="checkbox" id="settings-apply-wa" checked>
+                                <span>WhatsApp botunda otonom kullan</span>
+                            </label>
+                        </div>
+
+                        <div class="btn-row mt-15">
+                            <button type="submit" id="btn-save-ai-settings" class="action-btn">💾 Ayarları Kaydet ve Senkronize Et</button>
+                            <button type="button" id="btn-reset-ai-settings" class="action-btn secondary" data-action="reset-ai-settings">↺ Varsayılan Aslan AI'ya Dön</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="settings-section settings-danger-zone">
+                    <div class="flex-between">
+                        <h4>👤 Hesap Yönetimi</h4>
+                        <span class="pill-badge" id="settings-account-username">@kullanici</span>
+                    </div>
+                    <p class="hint mt-0">Oturumunuzu güvenle kapatabilir veya tekrar giriş yapabilirsiniz. Hesabınızı kalıcı olarak silerseniz tüm verileriniz ve bağlı bot oturumunuz temizlenir.</p>
+                    <div class="btn-row mt-14">
+                        <button type="button" id="btn-settings-logout" class="action-btn secondary" data-action="logout">🚪 Çıkış Yap</button>
+                        <button type="button" id="btn-open-delete-account" class="action-btn danger" data-action="open-delete-account-modal">🗑️ Hesabımı Kalıcı Olarak Sil</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-about">
+            <strong>Aslan AI</strong> · Türkçe ve İngilizce yapay zeka seslendirme, görsel üretimi, akıllı medya işleme ve otonom WhatsApp asistan yönetimi platformu.
+        </div>
+        <div class="flinks">
+            <button type="button" data-action="open-legal" data-page="privacy">Gizlilik Politikası</button>
+            <button type="button" data-action="open-legal" data-page="terms">Kullanım Koşulları</button>
+            <button type="button" data-action="open-legal" data-page="service">Hizmet Sözleşmesi</button>
+            <button type="button" data-action="open-legal" data-page="copyright">Telif Hakları</button>
+            <button type="button" data-action="open-legal" data-page="cookies">Çerez Politikası</button>
+        </div>
+        <div>© <span id="year"></span> Aslan AI · Tüm hakları saklıdır.</div>
+    </footer>
+</div>
+
+<!-- YASAL METİNLER VE GİZLİLİK POLİTİKASI MODALI (Footer bağlantılarından açılır, başlangıç DOM'unda tam yüklüdür) -->
+<div id="legal-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="legal-modal-title">
+    <div class="modal-card legal-modal-card">
+        <div class="modal-head">
+            <h3 id="legal-modal-title">📄 Yasal Bilgilendirme ve Gizlilik</h3>
+            <button type="button" class="modal-close" aria-label="Kapat" data-action="close-legal-modal">×</button>
         </div>
 
-        <div id="tts-workspace" class="is-hidden">
-            <label for="tts-text">Metin:</label>
-            <textarea id="tts-text" rows="4" maxlength="5000" placeholder="Seslendirilecek metni yazın..."></textarea>
-            <div class="char-row">
-                <span id="tts-char-count">0 / 5000 karakter</span>
-                <button type="button" class="action-btn small secondary" data-action="clear-tts">Temizle</button>
-            </div>
-
-            <label for="tts-voice">Ses Karakteri:</label>
-            <select id="tts-voice">
-                <option value="tr-TR-AhmetNeural">Ahmet (Erkek · Türkçe)</option>
-                <option value="tr-TR-EmelNeural">Emel (Kadın · Türkçe)</option>
-                <option value="en-US-AndrewNeural">Andrew (Male · English)</option>
-                <option value="en-US-AvaNeural">Ava (Female · English)</option>
-            </select>
-
-            <div class="slider-grid">
-                <div>
-                    <label for="tts-rate">Konuşma Hızı <span id="tts-rate-val">+0%</span></label>
-                    <input type="range" id="tts-rate" min="-40" max="60" step="5" value="0">
-                </div>
-                <div>
-                    <label for="tts-pitch">Ses Tonu <span id="tts-pitch-val">+0Hz</span></label>
-                    <input type="range" id="tts-pitch" min="-20" max="20" step="2" value="0">
-                </div>
-                <div class="flex-end">
-                    <button type="button" class="action-btn small secondary w-full" data-action="reset-tts-sliders">↺ Varsayılana Sıfırla</button>
-                </div>
-            </div>
-
-            <button id="btn-speak" class="action-btn" type="button" data-action="generate-audio">Sesi Oluştur ve Çal</button>
-
-            <div id="audio-box" class="is-hidden mt-15">
-                <div class="flex-between">
-                    <span class="hint mt-0">Oluşturulan Ses</span>
-                    <span class="pill-badge" id="tts-engine-badge">Aslan AI</span>
-                </div>
-                <audio id="player" controls class="w-full"></audio>
-                <div class="btn-row">
-                    <a id="dl-link" class="action-btn success" download="aslan_ses.mp3" href="#">⬇️ İndir (.mp3)</a>
-                    <button class="action-btn accent2 small btn-row-mt" type="button" data-action="copy-tts-link">🔗 Bağlantı Kopyala</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- ASLAN AI -->
-    <div id="panel-ai" class="card chat-panel-clean" role="tabpanel">
-        <div id="ai-auth-lock" class="auth-lock-box">
-            <img src="/assets/logo-mark.png" alt="Aslan AI Kilit">
-            <h4>🔒 Aslan AI'ya Erişim İçin Giriş Yapın</h4>
-            <p>Yapay zeka sohbeti ve görsel üretimi yalnızca kayıtlı kullanıcılara açıktır. Kullanım haklarınız doğrudan hesabınızda kalıcı olarak saklanır.</p>
-            <div class="auth-lock-actions">
-                <button type="button" class="action-btn" data-action="open-auth" data-mode="login" data-return-tab="ai">🔑 Giriş Yap</button>
-                <button type="button" class="action-btn secondary" data-action="open-auth" data-mode="register" data-return-tab="ai">📝 Kayıt Ol</button>
-            </div>
-        </div>
-
-        <div id="ai-workspace" class="is-hidden chat-workspace-clean">
-            <div class="chat-topbar">
-                <div class="chat-topbar-left">
-                    <button type="button" class="chip-btn" id="btn-toggle-history" data-action="toggle-history">🕘 Sohbetler <span id="history-count-badge"></span></button>
-                    <button type="button" class="chip-btn" data-action="new-chat">+ Yeni</button>
-                    <button type="button" class="chip-btn" data-action="open-image-studio">🎨 Görsel</button>
-                    <button type="button" class="chip-btn" data-action="toggle-subpanel" data-target="ai-commands">⚡ Komutlar</button>
-                </div>
-                <div class="chat-topbar-right">
-                    <span class="quota-pill">AI <strong class="quota-count" id="quota-display">--/5</strong></span>
-                    <span class="quota-pill">Görsel <strong id="image-quota-display">--/2</strong></span>
-                    <span class="quota-pill">Bot <strong id="wa-quota-display">--/10</strong></span>
-                </div>
-            </div>
-
-            <!-- 30 Gunluk Sohbet Gecmisi ve Sabitleme (En fazla 2 sohbet) -->
-            <div class="sub-panel history-drawer" id="chat-history-drawer">
-                <div class="history-head">
-                    <strong>Sohbet Geçmişi (30 Gün)</strong>
-                    <span class="pin-limit-badge" id="pinned-count-badge">Sabitli: 0/2</span>
-                </div>
-                <p class="history-privacy-note">Sohbetleriniz model eğitimi için değil, yalnızca kaldığınız yerden devam etmeniz için 30 gün saklanır. En fazla 2 sohbeti silinmemek üzere sabitleyebilirsiniz.</p>
-                <div class="history-list" id="chat-history-list"></div>
-            </div>
-
-            <!-- Medya & Ses Hizli Komutlari -->
-            <div class="sub-panel" id="ai-commands">
-                <label>Hızlı Komutlar:</label>
-                <div class="btn-row" id="ai-command-row">
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görselin üzerine 'ASLAN' yazısını ekle">📝 Yazı Ekle</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görsele sinematik siyah beyaz filtre uygula">🎨 Filtre Uygula</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="İki farklı aslan görseli üret, bunları birleştirip videoya dönüştür">🎞️ 2 Görsel → Video</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Videodan sesi çıkar">🎧 Ses Çıkar</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Videoyu 5 saniye kırp">✂️ Videoyu Kırp</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Sesi arka plan gürültüsünden temizle">🔇 Sesi Temizle</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Fotoğraflardan müzikli video oluştur">🎵 Müzikli Slayt</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Aslan AI'ya hoş geldiniz metnini Emel sesiyle oku">🔊 Sesli Oku</button>
-                    <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Sesli okumayı durdur">⏹️ Okumayı Durdur</button>
-                </div>
-            </div>
-
-            <!-- Görsel Üretim Stüdyosu -->
-            <div class="sub-panel" id="image-studio">
-                <label for="image-prompt">Görsel açıklaması (en fazla 1000 karakter):</label>
-                <textarea id="image-prompt" rows="2" maxlength="1000" placeholder="Örn: 'kırmızı sibernetik aslan logosu, metalik zemin, 4K'"></textarea>
-                <div class="btn-row">
-                    <button class="action-btn accent2" type="button" id="btn-generate-image" data-action="generate-image">🎨 Görsel Üret</button>
-                </div>
-                <p class="hint">Kullanıcı başına aylık toplam 2 görsel üretim hakkınız hesabınızda tutulur (yeni ay başladığında yenilenir).</p>
-            </div>
-
-            <div class="chat-box" id="chat-box" aria-live="polite">
-                <div class="msg bot"><div class="md-body"><p>Merhaba, ben Aslan AI. Size nasıl yardımcı olabilirim?</p></div></div>
-            </div>
-
-            <div class="session-media-bar is-hidden" id="session-media-bar">
-                <span class="session-media-title">📎 Aktif Medya Bağlamı:</span>
-                <div class="session-media-chips" id="session-media-chips"></div>
-                <button type="button" class="session-media-clear" id="btn-session-media-clear" data-action="clear-session-media">Temizle</button>
-            </div>
-
-            <div class="attach-tray" id="attach-tray"></div>
-
-            <!-- Alt Mesaj Cubugu (Sagdan Sola: Gonder <- Mikrofon <- Mesaj Kutusu <- Dosya Ekle) -->
-            <div class="input-row chat-composer">
-                <button class="tool-btn attach-btn" type="button" id="btn-attach" title="Dosya ekle (görsel/video/ses/belge)" aria-label="Dosya seç ve ekle" data-action="trigger-ai-file">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                </button>
-                <textarea id="ai-input" rows="1" maxlength="8000" placeholder="Aslan AI'ya bir mesaj yazın..."></textarea>
-                <button class="tool-btn mic-btn" type="button" id="btn-mic" title="Sesli dikte (başlat / durdur)" aria-label="Sesli mesajı metne çevir" aria-pressed="false" data-action="toggle-record">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
-                </button>
-                <button id="btn-ai" class="send-btn" type="button" title="Gönder" aria-label="Gönder" data-action="send-ai">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                </button>
-            </div>
-            <input type="file" id="ai-file" multiple hidden accept="image/*,video/*,audio/*,application/pdf,.txt,.md,.csv,.json">
-        </div>
-    </div>
-
-    <!-- YASAL SAYFALAR -->
-    <div id="panel-legal" class="card" role="tabpanel">
         <div class="legal-shell">
             <div class="legal-nav" role="tablist">
                 <button type="button" class="active" data-action="show-legal" data-page="terms">Kullanım Koşulları</button>
@@ -401,8 +538,8 @@
                         <li><strong>Yüklenen içerik:</strong> Yalnızca sizin talebinizle işlenir ve işlem sonrası hemen silinir.</li>
                     </ul>
 
-                    <h3>2. Veri Güvenliği ve KVKK</h3>
-                    <p>Verileriniz şifreli iletişim kanalı ile iletilir. KVKK kapsamındaki bilgi, düzeltme veya silme taleplerinizi <strong>aslan@teknoloji.com</strong> adresine iletebilirsiniz.</p>
+                    <h3>2. Veri Güvenliği, Hesap Silme ve KVKK</h3>
+                    <p>Verileriniz şifreli iletişim kanalı ile iletilir. Ayarlar menüsünden hesabınızı dilediğiniz an kalıcı olarak silebilir veya KVKK kapsamındaki taleplerinizi <strong>aslan@teknoloji.com</strong> adresine iletebilirsiniz.</p>
                 </div>
             </section>
 
@@ -451,17 +588,6 @@
             </section>
         </div>
     </div>
-
-    <footer class="site-footer">
-        <div class="flinks">
-            <button type="button" data-action="open-legal" data-page="terms">Kullanım Koşulları</button>
-            <button type="button" data-action="open-legal" data-page="privacy">Gizlilik Politikası</button>
-            <button type="button" data-action="open-legal" data-page="service">Hizmet Sözleşmesi</button>
-            <button type="button" data-action="open-legal" data-page="copyright">Telif Hakları</button>
-            <button type="button" data-action="open-legal" data-page="cookies">Çerez Politikası</button>
-        </div>
-        <div>© <span id="year"></span> Aslan AI · Tüm hakları saklıdır.</div>
-    </footer>
 </div>
 
 <script src="/assets/app.min.js?v=__BUILD_HASH__" defer></script>

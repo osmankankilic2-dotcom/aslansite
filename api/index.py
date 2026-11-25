@@ -13,8 +13,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import api_utils
-from core.handlers import ai, auth, chats, consent, health, image, media, ping, quota, social, stt, tts, wa
+from core import api_utils, config as cfg, quota as quota_mod
+from core.handlers import ai, auth, chats, consent, health, image, media, ping, quota, settings, social, stt, tts, wa
 
 _INDEX_PATHS = frozenset({'', '/api', '/api/index', '/api/index.py'})
 
@@ -63,6 +63,8 @@ def _resolve_handler(norm_path: str):
         return chats.handler
     if p == '/api/wa' or p.startswith('/api/wa/'):
         return wa.handler
+    if p == '/api/settings' or p.startswith('/api/settings/'):
+        return settings.handler
     return _EXACT_ROUTES.get(p)
 
 
@@ -72,6 +74,33 @@ class handler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         try:
             norm_path = _normalize_route(self.path)
+            base_path = (norm_path or '/').split('?', 1)[0].rstrip('/').lower()
+
+            guard_status, guard_msg = api_utils.check_api_access_guard(
+                getattr(self, 'headers', None), path=base_path, method=method)
+            if guard_status:
+                api_utils.send_json(
+                    self, guard_status, {'error': guard_msg},
+                    methods='GET, POST, DELETE, OPTIONS',
+                )
+                return
+
+            if method.upper() != 'OPTIONS' and not api_utils.is_cron_or_keepalive_request(
+                getattr(self, 'headers', None), path=base_path
+            ) and base_path not in ('/api/ping', '/api/whatsapp/keep-alive'):
+                ip = api_utils.client_ip(getattr(self, 'headers', None))
+                ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                    ip, 'api_global', getattr(cfg, 'IP_API_PER_MINUTE_LIMIT', 120), 60)
+                if not ip_ok:
+                    api_utils.send_json(
+                        self, 429,
+                        {'error': 'Çok fazla API isteği gönderildi. Lütfen %d saniye bekleyin.'
+                                  % ip_usage.get('reset_in', 15)},
+                        methods='GET, POST, DELETE, OPTIONS',
+                        extra_headers={'Retry-After': str(max(1, int(ip_usage.get('reset_in', 15))))},
+                    )
+                    return
+
             target_cls = _resolve_handler(norm_path)
             if target_cls is None:
                 api_utils.send_json(

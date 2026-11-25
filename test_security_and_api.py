@@ -618,9 +618,12 @@ def main():
 
     # ------------------------------------------------------------------
     section("10. AYRI FFMPEG SEKMESI YOK, AYLIK 2 GORSEL, FREE IMAGE FAILOVER, STT & AI PIPELINE")
-    check("Separate Medya/FFmpeg tab removed from HTML (3 tabs only)",
+    check("Separate Medya/FFmpeg & Legal tabs removed from top bar (Ses, Aslan AI, Ayarlar + Footer Privacy)",
           'id="panel-media"' not in html_txt and 'data-tab="media"' not in html_txt
-          and all(t in html_txt for t in ('id="panel-tts"', 'id="panel-ai"', 'id="panel-legal"')))
+          and 'data-tab="legal"' not in html_txt and '⚖️' not in html_txt
+          and all(t in html_txt for t in ('id="panel-tts"', 'id="panel-ai"', 'id="panel-settings"', 'id="legal-modal"', 'class="site-footer"', 'class="composer-dock"')))
+    check("Mobile fixed/sticky chat composer dock & 100dvh viewport rules in CSS/JS",
+          "composer-dock" in css_txt and "100dvh" in css_txt and "visualViewport" in js_txt)
 
     # Strict monthly 2 image quota (no daily limit blocking 2 on same day, 3rd blocked)
     r_iq = client.post("/api/auth/register", json={
@@ -768,7 +771,8 @@ def main():
         "sw.js": sw_txt,
     }
     forbidden_ui_tokens = (
-        "gemini", "pollinations", "ffmpeg", "ffprobe", "yt-dlp", "yt_dlp", "ytdlp",
+        "pollinations", "duckduckgo", "deepinfra", "openrouter", "anthropic",
+        "ffmpeg", "ffprobe", "yt-dlp", "yt_dlp", "ytdlp",
         "baileys", "whiskeysockets", "edge-tts", "edge_tts", "gtts", "imagen",
         "nano-banana", "pillow", "openai", "mistral", "deepseek", "claude", "llama",
         "groq", "huggingface", "neural tts", "pbkdf2", "sunucusuz",
@@ -780,10 +784,12 @@ def main():
         for tok in forbidden_ui_tokens:
             if tok in low:
                 leaks.append(f"{fname}:{tok}")
-    check("Built UI/manifest/SW contain zero backend library, model or API names",
+    check("Built UI/manifest/SW contain zero internal backend library, tool or engine names",
           len(leaks) == 0, ", ".join(leaks))
-    check("Built HTML omits 'API' wording from visible interface",
-          not re.search(r'\bapi\b', html_txt, re.IGNORECASE))
+    html_outside_settings = html_txt.split('id="panel-settings"')[0]
+    check("Google Gemini allowed in Settings while API wording stays out of main chat/TTS panels",
+          "Google Gemini" in html_txt
+          and not re.search(r'\bapi\b', html_outside_settings, re.IGNORECASE))
 
     sample_raw_errors = [
         "gemini-2.5-flash quota exceeded",
@@ -1449,6 +1455,398 @@ def main():
     d2 = FakeHandler(api_index.handler, "DELETE", path=f"/api/index.py?__route=/api/chats/{c2_id}", headers=ch_hdrs).run()
     check("Unpinning frees slot for another pinned chat & DELETE /api/chats/<id> removes chat",
           u1.status_code == 200 and p4.status_code == 200 and d2.status == 200)
+
+    # ------------------------------------------------------------------
+    section("16. AYARLAR MENUSU, OZEL SAGLAYICI / ENDPOINT, WA OTONOM SENKRON & HESAP SILME")
+    check("Unauthenticated /api/settings/ai → 401", client.get("/api/settings/ai").status_code == 401)
+    check("Frontend Settings UI has Google Gemini & Custom Endpoint strictly at bottom + Logout & Delete Account",
+          'id="settings-ai-provider"' in html_txt
+          and html_txt.rfind('value="custom"') > html_txt.rfind('value="gemini"')
+          and 'id="btn-settings-logout"' in html_txt
+          and 'id="btn-open-delete-account"' in html_txt
+          and 'id="delete-account-modal"' in html_txt)
+
+    r_su = client.post("/api/auth/register", json={
+        "username": "SettingsUser", "password": good_pw, "password_confirm": good_pw
+    })
+    su_hdrs = {"Authorization": f"Bearer {r_su.get_json()['token']}"}
+
+    # SSRF validation on custom endpoints
+    for bad_ep in ("http://localhost:8080/v1", "http://127.0.0.1/v1", "https://169.254.169.254/latest", "http://custom.example.com/v1"):
+        r_bad_ep = client.post("/api/settings/ai", json={
+            "provider": "custom", "endpoint": bad_ep, "model": "my-model", "api_key": "sk-test"
+        }, headers=su_hdrs)
+        check(f"Custom endpoint SSRF/HTTP rejected → 400: {bad_ep[:32]}", r_bad_ep.status_code == 400, str(r_bad_ep.status_code))
+
+    # Save Gemini settings -> masked response, encrypted in DB, synced to WA bot
+    gemini_user_key = "AIzaSettingsGeminiSecretKey123456"
+    r_set_gem = client.post("/api/settings/ai", json={
+        "provider": "gemini",
+        "model": "gemini-4-hydrogen",
+        "api_key": gemini_user_key,
+        "apply_to_chat": True,
+        "apply_to_whatsapp": True,
+    }, headers=su_hdrs)
+    sj_gem = r_set_gem.get_json() or {}
+    wa_after_gem = database.get_user_wa_bot("settingsuser")
+    check("POST /api/settings/ai (Gemini) saves encrypted key, masks key & syncs WA bot",
+          r_set_gem.status_code == 200
+          and sj_gem.get("settings", {}).get("provider") == "gemini"
+          and sj_gem.get("settings", {}).get("has_api_key") is True
+          and gemini_user_key not in json.dumps(sj_gem)
+          and (sj_gem.get("providers") or [{}])[-1].get("id") == "custom"
+          and ((wa_after_gem.get("config") or {}).get("custom_ai") or {}).get("provider") == "gemini"
+          and ((wa_after_gem.get("config") or {}).get("custom_ai") or {}).get("enabled") is True)
+
+    # Custom endpoint save & use in chat (/api/ai)
+    with mock.patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]):
+        v_set_cust = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/settings/ai",
+            body=json.dumps({
+                "provider": "custom",
+                "endpoint": "https://api.custom-llm.example/v1/chat/completions",
+                "model": "custom-model-v1",
+                "api_key": "cust-secret-token-77",
+                "apply_to_chat": True,
+                "apply_to_whatsapp": True,
+            }).encode("utf-8"),
+            headers=su_hdrs,
+        ).run()
+    v_cj = v_set_cust.json()
+    check("Vercel /api/settings/ai (Custom Endpoint) validates HTTPS, saves & syncs WA config",
+          v_set_cust.status == 200
+          and v_cj.get("settings", {}).get("provider") == "custom"
+          and "cust-secret-token-77" not in json.dumps(v_cj)
+          and ((database.get_user_wa_bot("settingsuser").get("config") or {}).get("custom_ai") or {}).get("provider") == "custom")
+
+    seen_custom_calls = []
+
+    def fake_custom_post(url, payload, timeout=90, headers=None):
+        seen_custom_calls.append((url, payload.get("model"), headers or {}))
+        return {"choices": [{"message": {"content": "Özel uç nokta yanıtı başarıyla alındı!"}}]}
+
+    with mock.patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]), \
+         mock.patch.object(ai_engine, "_post_json", side_effect=fake_custom_post):
+        r_cust_ai = client.post("/api/ai", json={"message": "Özel modelimle merhaba de"}, headers=su_hdrs)
+    check("/api/ai uses user's Custom Endpoint & API key when configured in Settings",
+          r_cust_ai.status_code == 200
+          and "Özel uç nokta yanıtı" in (r_cust_ai.get_json() or {}).get("reply", "")
+          and any(u == "https://api.custom-llm.example/v1/chat/completions" and m == "custom-model-v1" and h.get("Authorization") == "Bearer cust-secret-token-77"
+                  for u, m, h in seen_custom_calls),
+          str(seen_custom_calls))
+
+    # Logout -> re-login -> Permanent Account Deletion with password verification
+    r_su_out = client.post("/api/auth/logout", headers=su_hdrs)
+    r_su_relogin = client.post("/api/auth/login", json={"username": "SettingsUser", "password": good_pw})
+    su_hdrs2 = {"Authorization": f"Bearer {(r_su_relogin.get_json() or {}).get('token', '')}"}
+    r_del_wrong = client.post("/api/auth/delete-account", json={"password": "WrongPassword123!", "confirm": True}, headers=su_hdrs2)
+    r_del_ok = client.post("/api/auth/delete-account", json={"password": good_pw, "confirm": True}, headers=su_hdrs2)
+    r_me_deleted = client.get("/api/auth/me", headers=su_hdrs2)
+    r_login_deleted = client.post("/api/auth/login", json={"username": "SettingsUser", "password": good_pw})
+    check("Logout -> Re-login succeeds; Wrong-pw delete → 403; Valid permanent deletion wipes user completely",
+          r_su_out.status_code == 200 and r_su_relogin.status_code == 200
+          and r_del_wrong.status_code == 403
+          and r_del_ok.status_code == 200 and (r_del_ok.get_json() or {}).get("deleted") is True
+          and r_me_deleted.status_code == 401
+          and r_login_deleted.status_code == 401
+          and database.get_user_by_username("SettingsUser") is None)
+
+    # ------------------------------------------------------------------
+    section("17. OTONOM WHATSAPP BOTU & SOHBETTEN KISI/GRUBA DOGRUDAN MESAJ GONDERME")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+        s2.bind(("127.0.0.1", 0))
+        wa_port2 = s2.getsockname()[1]
+
+    wa_token2 = "test-wa-send-token-2026"
+    wa_env2 = os.environ.copy()
+    wa_env2.update({
+        "WA_WORKER_HOST": "127.0.0.1",
+        "WA_WORKER_PORT": str(wa_port2),
+        "WA_BOT_WORKER_TOKEN": wa_token2,
+        "WA_MOCK_MODE": "1",
+        "WA_AUTH_DIR": str(WORK / "wa_auth2"),
+    })
+    wa_proc2 = subprocess.Popen(
+        ["node", "server.mjs"],
+        cwd=str(wa_dir),
+        env=wa_env2,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    old_wa_url2 = os.environ.get("WA_BOT_WORKER_URL")
+    old_wa_tok2 = os.environ.get("WA_BOT_WORKER_TOKEN")
+    os.environ["WA_BOT_WORKER_URL"] = f"http://127.0.0.1:{wa_port2}"
+    os.environ["WA_BOT_WORKER_TOKEN"] = wa_token2
+    try:
+        for _ in range(80):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{wa_port2}/health", timeout=1) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.2)
+
+        r_wsu = client.post("/api/auth/register", json={
+            "username": "WaSendUser", "password": good_pw, "password_confirm": good_pw
+        })
+        wsu_hdrs = {"Authorization": f"Bearer {r_wsu.get_json()['token']}"}
+
+        # Pair -> mock-connect -> seed contacts/groups -> mark active
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{wa_port2}/wa/pair",
+            data=json.dumps({"user_id": "wasenduser", "phone": "905559998877", "config": {}}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token2},
+            method="POST",
+        ), timeout=5).read()
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{wa_port2}/wa/mock-connect",
+            data=json.dumps({"user_id": "wasenduser"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token2},
+            method="POST",
+        ), timeout=5).read()
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{wa_port2}/wa/mock-contacts",
+            data=json.dumps({
+                "user_id": "wasenduser",
+                "contacts": [
+                    {"jid": "905551112233@s.whatsapp.net", "name": "Ahmet Yılmaz", "isGroup": False},
+                    {"jid": "120363000111@g.us", "name": "Aile Grubu", "isGroup": True},
+                    {"jid": "905552223344@s.whatsapp.net", "name": "Mehmet Demir", "isGroup": False},
+                    {"jid": "905553334455@s.whatsapp.net", "name": "Mehmet Kaya", "isGroup": False},
+                ],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token2},
+            method="POST",
+        ), timeout=5).read()
+
+        st_wsu = database.get_user_wa_bot("wasenduser") or {}
+        st_wsu["connected"] = True
+        st_wsu["connected_ack"] = True
+        st_wsu["stage"] = "active"
+        database.save_user_wa_bot("wasenduser", st_wsu)
+
+        # Direct send to phone number via /api/ai chat action
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Mesajınızı iletiyorum.\n```aslan_action\n{"action":"wa_bot_send_message","params":{"target":"+90 532 123 45 67","message":"Selam nasılsın?"}}\n```',
+            None,
+        )):
+            r_snd_phone = client.post("/api/ai", json={
+                "message": "+90 532 123 45 67 numarasına WhatsApp'tan 'Selam nasılsın?' yaz"
+            }, headers=wsu_hdrs)
+        spj = r_snd_phone.get_json() or {}
+        check("Aslan AI chat sends WhatsApp message directly to phone number (9/10 WA quota)",
+              r_snd_phone.status_code == 200
+              and (spj.get("wa_event") or {}).get("type") == "message_sent"
+              and (spj.get("wa_event") or {}).get("target_label") == "+905321234567"
+              and spj["quota"]["wa_bot"]["remaining"] == 9)
+
+        # Direct send to named contact via /api/ai
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Ahmet kişisine yazdım.\n```aslan_action\n{"action":"wa_bot_send_message","params":{"target":"Ahmet","message":"Toplantı saat 15:00"}}\n```',
+            None,
+        )):
+            r_snd_contact = client.post("/api/ai", json={
+                "message": "Ahmet kişisine 'Toplantı saat 15:00' gönder"
+            }, headers=wsu_hdrs)
+        scj = r_snd_contact.get_json() or {}
+        check("Aslan AI chat resolves contact name ('Ahmet Yılmaz') & sends WhatsApp message (8/10 WA)",
+              r_snd_contact.status_code == 200
+              and (scj.get("wa_event") or {}).get("type") == "message_sent"
+              and (scj.get("wa_event") or {}).get("target_label") == "Ahmet Yılmaz"
+              and (scj.get("wa_event") or {}).get("is_group") is False
+              and scj["quota"]["wa_bot"]["remaining"] == 8)
+
+        # Direct send to group via Vercel /api/wa/send
+        v_snd_grp = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/wa/send",
+            body=json.dumps({"target": "Aile Grubu", "message": "Akşam 8de buluşuyoruz"}).encode("utf-8"),
+            headers=wsu_hdrs,
+        ).run()
+        vgj = v_snd_grp.json()
+        check("Vercel /api/wa/send delivers message to WhatsApp group ('Aile Grubu') & consumes 1 WA credit (7/10)",
+              v_snd_grp.status == 200
+              and vgj.get("sent") is True
+              and vgj.get("target_label") == "Aile Grubu"
+              and vgj.get("is_group") is True
+              and vgj["quota"]["wa_bot"]["remaining"] == 7)
+
+        # Ambiguous contact ('Mehmet') asks for clarification safely
+        v_snd_amb = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/wa/send",
+            body=json.dumps({"target": "Mehmet", "message": "Selam"}).encode("utf-8"),
+            headers=wsu_hdrs,
+        ).run()
+        vaj = v_snd_amb.json()
+        check("Ambiguous contact name returns clarification candidates without mis-sending",
+              v_snd_amb.status == 400 and vaj.get("ambiguous") is True and len(vaj.get("candidates", [])) == 2)
+
+        # Bridge-level direct /wa/send + /wa/contacts verification on api/wa_bridge.mjs
+        send_bridge_script = (
+            "import bridge from './api/wa_bridge.mjs';\n"
+            "const tok = process.env.TEST_BRIDGE_TOK;\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/pair', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bsender', phone: '905559990000', config: {} }) }));\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-connect', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bsender' }) }));\n"
+            "await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-contacts', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bsender', contacts: [{ jid: '120363999@g.us', name: 'Ekip Grubu', isGroup: true }] }) }));\n"
+            "const cRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/contacts?user_id=bsender', { headers: { 'x-worker-token': tok } }));\n"
+            "const sRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/send', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bsender', target: 'Ekip Grubu', message: 'Rapor hazır' }) }));\n"
+            "console.log(JSON.stringify({ cSt: cRes.status, cJ: await cRes.json(), sSt: sRes.status, sJ: await sRes.json() }));\n"
+        )
+        sb_run = subprocess.run(
+            ["node", "--input-type=module", "-e", send_bridge_script],
+            cwd=str(ROOT), env=b_env, capture_output=True, text=True,
+        )
+        sb_out = json.loads(sb_run.stdout.strip().splitlines()[-1]) if (sb_run.returncode == 0 and sb_run.stdout.strip()) else {}
+        check("Vercel api/wa_bridge.mjs supports /wa/contacts and /wa/send for direct group/contact messaging",
+              sb_run.returncode == 0
+              and sb_out.get("cSt") == 200 and len(sb_out.get("cJ", {}).get("contacts", [])) == 1
+              and sb_out.get("sSt") == 200 and (sb_out.get("sJ") or {}).get("sent") is True
+              and (sb_out.get("sJ") or {}).get("target_label") == "Ekip Grubu",
+              (sb_run.stdout + sb_run.stderr)[:200])
+
+        # 7/24 kesintisiz aktif WhatsApp relay & heartbeat denetimi
+        br_247_src = (ROOT / "api" / "wa_bridge.mjs").read_text(encoding="utf-8")
+        rt_247_src = (wa_dir / "bot_runtime.mjs").read_text(encoding="utf-8")
+        check("7/24 continuous active relay & WebSocket heartbeat symbols present in bridge & worker",
+              all(s in br_247_src for s in (
+                  "CONTINUOUS_ACTIVE_MODE", "SOCKET_HEARTBEAT_MS",
+                  "triggerRelayHandover", "isSessionEligibleForActiveRelay", "evaluateWakeLeaseDecision",
+              )) and "heartbeatTimer" in rt_247_src and "scheduleWorkerReconnect" in rt_247_src)
+
+        relay_unit_script = (
+            "import { isSessionEligibleForActiveRelay, evaluateWakeLeaseDecision } from './api/wa_bridge.mjs';\n"
+            "const now = 1_800_000_000_000;\n"
+            "const healthyLease = { activeToken: 'tokA', lastWakeAt: now - 30000, lastHeartbeatAt: now - 10000, leaseExpiresAt: now + 200000 };\n"
+            "const dPingHealthy = evaluateWakeLeaseDecision(healthyLease, { force: false }, now);\n"
+            "const staleLease = { activeToken: 'tokA', lastWakeAt: now - 120000, lastHeartbeatAt: now - 70000, leaseExpiresAt: now + 100000 };\n"
+            "const dPingStale = evaluateWakeLeaseDecision(staleLease, { force: false }, now);\n"
+            "const dChainGood = evaluateWakeLeaseDecision(healthyLease, { handover: true, chainToken: 'tokA' }, now);\n"
+            "const dChainBad = evaluateWakeLeaseDecision(healthyLease, { handover: true, chainToken: 'wrong' }, now);\n"
+            "const eTransient = isSessionEligibleForActiveRelay({ userId: 'u1', loggedOut: false, stopped: false, connected: false, config: { enabled: true }, creds: { registered: true } });\n"
+            "const eLoggedOut = isSessionEligibleForActiveRelay({ userId: 'u1', loggedOut: true, stopped: false, connected: true, config: { enabled: true }, creds: { registered: true } });\n"
+            "const eStopped = isSessionEligibleForActiveRelay({ userId: 'u1', loggedOut: false, stopped: true, connected: false, config: { enabled: true }, creds: { registered: true } });\n"
+            "console.log(JSON.stringify({ dPingHealthy, dPingStale, dChainGood, dChainBad, eTransient, eLoggedOut, eStopped }));\n"
+        )
+        ru_run = subprocess.run(["node", "--input-type=module", "-e", relay_unit_script], cwd=str(ROOT), capture_output=True, text=True)
+        ru_out = json.loads(ru_run.stdout.strip().splitlines()[-1]) if (ru_run.returncode == 0 and ru_run.stdout.strip()) else {}
+        check("Wake lease protects active 24/7 relay from ping overwrite, auto-recovers stale leases & transient disconnects",
+              ru_run.returncode == 0
+              and (ru_out.get("dPingHealthy") or {}).get("allow") is False
+              and (ru_out.get("dPingHealthy") or {}).get("reason") == "active_relay_healthy"
+              and (ru_out.get("dPingStale") or {}).get("allow") is True
+              and (ru_out.get("dChainGood") or {}).get("allow") is True
+              and (ru_out.get("dChainBad") or {}).get("allow") is False
+              and (ru_out.get("dChainBad") or {}).get("reason") == "stale_chain"
+              and ru_out.get("eTransient") is True
+              and ru_out.get("eLoggedOut") is False
+              and ru_out.get("eStopped") is False,
+              (ru_run.stdout + ru_run.stderr)[:240])
+    finally:
+        if old_wa_url2 is None:
+            os.environ.pop("WA_BOT_WORKER_URL", None)
+        else:
+            os.environ["WA_BOT_WORKER_URL"] = old_wa_url2
+        if old_wa_tok2 is None:
+            os.environ.pop("WA_BOT_WORKER_TOKEN", None)
+        else:
+            os.environ["WA_BOT_WORKER_TOKEN"] = old_wa_tok2
+        wa_proc2.terminate()
+        try:
+            wa_proc2.wait(timeout=5)
+        except Exception:
+            wa_proc2.kill()
+
+    # ------------------------------------------------------------------
+    section("18. GOOGLEBOT SEO / ADSENSE HAZIRLIGI, API BOT KORUMASI & HTTP/HTTPS TESTLERI")
+    robots_txt = (ROOT / "public" / "robots.txt").read_text(encoding="utf-8")
+    sitemap_xml = (ROOT / "public" / "sitemap.xml").read_text(encoding="utf-8")
+    check("robots.txt allows Googlebot & AdsBot-Google on /, disallows /api/, includes Sitemap",
+          "Googlebot" in robots_txt and "AdsBot-Google" in robots_txt
+          and "Disallow: /api/" in robots_txt and "sitemap.xml" in robots_txt.lower())
+    check("sitemap.xml is valid XML referencing https://aslansite.vercel.app/",
+          "<urlset" in sitemap_xml and "https://aslansite.vercel.app/" in sitemap_xml
+          and client.get("/sitemap.xml").status_code == 200)
+    check("HTML has semantic landmarks & SEO meta tags (<main>, canonical, robots, googlebot)",
+          "<main" in html_txt and 'name="robots"' in html_txt
+          and 'name="googlebot"' in html_txt and 'rel="canonical"' in html_txt)
+
+    # Googlebot & AdsBot can crawl public HTML (/), robots.txt & sitemap.xml (200)
+    for g_ua in ("Googlebot/2.1 (+http://www.google.com/bot.html)", "AdsBot-Google (+http://www.google.com/adsbot.html)"):
+        r_g = client.get("/", headers={"User-Agent": g_ua})
+        check(f"{g_ua.split('/')[0]} can index / → 200", r_g.status_code == 200)
+
+    # External bots, scrapers & direct unauthenticated clients blocked (403) on /api/*
+    for bot_ua in ("curl/8.5.0", "python-requests/2.31.0", "sqlmap/1.8", "Googlebot/2.1"):
+        r_fb = client.get("/api/health", headers={"User-Agent": bot_ua})
+        r_vb = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/health",
+                           headers={"User-Agent": bot_ua}).run()
+        check(f"Automated bot UA ({bot_ua.split('/')[0]}) blocked from /api/health → 403",
+              r_fb.status_code == 403 and r_vb.status == 403, f"flask={r_fb.status_code}, vercel={r_vb.status}")
+
+    with mock.patch.dict(os.environ, {"ASLAN_STRICT_API_GUARD": "1"}):
+        r_direct = client.get("/api/health", headers={"User-Agent": "Mozilla/5.0"})
+        r_good_app = client.get("/api/health", headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "AslanWeb",
+            "Sec-Fetch-Site": "same-origin",
+        })
+        r_cron_ping = client.get("/api/ping", headers={
+            "User-Agent": "vercel-cron/1.0",
+            "X-Vercel-Cron": "1",
+        })
+    check("Strict API guard blocks direct browserless API access (403) while allowing AslanWeb same-origin & Vercel Cron",
+          r_direct.status_code == 403 and r_good_app.status_code == 200 and r_cron_ping.status_code == 200,
+          f"direct={r_direct.status_code}, app={r_good_app.status_code}, cron={r_cron_ping.status_code}")
+
+    # Node.js IPv4 http/https helper local round-trip & redirect test
+    import http.server as _http_srv
+    import threading as _thr
+
+    class _LoopHandler(_http_srv.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/redir":
+                self.send_response(302)
+                self.send_header("Location", "/ok")
+                self.end_headers()
+                return
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            ln = int(self.headers.get("Content-Length") or 0)
+            req_b = self.rfile.read(ln) if ln else b"{}"
+            body = json.dumps({"echo": json.loads(req_b.decode("utf-8"))}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    loop_srv = _http_srv.HTTPServer(("127.0.0.1", 0), _LoopHandler)
+    loop_port = loop_srv.server_address[1]
+    t_srv = _thr.Thread(target=loop_srv.serve_forever, daemon=True)
+    t_srv.start()
+    try:
+        node_http_test = (
+            f"import {{ ipv4Get, ipv4PostJson }} from './worker/wa_service/ipv4.mjs';\n"
+            f"const g = await ipv4Get('http://127.0.0.1:{loop_port}/redir');\n"
+            f"const p = await ipv4PostJson('http://127.0.0.1:{loop_port}/echo', {{ ping: 'aslan' }});\n"
+            f"console.log(JSON.stringify({{ g: g.status, p: p.status, echo: p.data?.echo?.ping }}));\n"
+        )
+        nh_run = subprocess.run(["node", "--input-type=module", "-e", node_http_test], cwd=str(ROOT), capture_output=True, text=True)
+        nh_out = json.loads(nh_run.stdout.strip().splitlines()[-1]) if (nh_run.returncode == 0 and nh_run.stdout.strip()) else {}
+        check("Node.js IPv4 http/https client handles GET redirects & JSON POST cleanly",
+              nh_run.returncode == 0 and nh_out.get("g") == 200 and nh_out.get("p") == 200 and nh_out.get("echo") == "aslan",
+              (nh_run.stdout + nh_run.stderr)[:180])
+    finally:
+        loop_srv.shutdown()
+        loop_srv.server_close()
 
     # ------------------------------------------------------------------
     section("SUMMARY")

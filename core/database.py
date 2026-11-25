@@ -138,7 +138,8 @@ def _connect() -> sqlite3.Connection:
             quota_json TEXT NOT NULL,
             sessions_json TEXT NOT NULL,
             wa_bot_json TEXT NOT NULL DEFAULT '{}',
-            chats_json TEXT NOT NULL DEFAULT '[]'
+            chats_json TEXT NOT NULL DEFAULT '[]',
+            ai_settings_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -152,6 +153,10 @@ def _connect() -> sqlite3.Connection:
         pass
     try:
         conn.execute("ALTER TABLE users ADD COLUMN chats_json TEXT NOT NULL DEFAULT '[]'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN ai_settings_json TEXT NOT NULL DEFAULT '{}'")
     except sqlite3.OperationalError:
         pass
     conn.execute(
@@ -181,6 +186,11 @@ def _row_to_dict(row) -> dict:
         chats = json.loads(raw_chats) if isinstance(raw_chats, str) else []
     except Exception:
         chats = []
+    raw_ai_settings = row["ai_settings_json"] if ("ai_settings_json" in keys and row["ai_settings_json"]) else "{}"
+    try:
+        ai_settings = json.loads(raw_ai_settings) if isinstance(raw_ai_settings, str) else {}
+    except Exception:
+        ai_settings = {}
     return {
         "username": row["username"],
         "username_lower": row["username_lower"],
@@ -192,14 +202,15 @@ def _row_to_dict(row) -> dict:
         "sessions": json.loads(row["sessions_json"] or "[]"),
         "wa_bot": wa_bot if isinstance(wa_bot, dict) else {},
         "chats": chats if isinstance(chats, list) else [],
+        "ai_settings": ai_settings if isinstance(ai_settings, dict) else {},
     }
 
 
 def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
     conn.execute(
         """
-        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json, wa_bot_json, chats_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json, wa_bot_json, chats_json, ai_settings_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(username_lower) DO UPDATE SET
             username=excluded.username,
             password_hash=excluded.password_hash,
@@ -208,7 +219,8 @@ def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
             quota_json=excluded.quota_json,
             sessions_json=excluded.sessions_json,
             wa_bot_json=excluded.wa_bot_json,
-            chats_json=excluded.chats_json
+            chats_json=excluded.chats_json,
+            ai_settings_json=excluded.ai_settings_json
         """,
         (
             rec["username"],
@@ -221,6 +233,7 @@ def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
             json.dumps(rec.get("sessions") or [], ensure_ascii=False),
             json.dumps(rec.get("wa_bot") or {}, ensure_ascii=False),
             json.dumps(rec.get("chats") or [], ensure_ascii=False),
+            json.dumps(rec.get("ai_settings") or {}, ensure_ascii=False),
         ),
     )
     conn.commit()
@@ -337,6 +350,7 @@ def create_user(username: str, password_hash: str, initial_sessions=None):
             "sessions": list(initial_sessions or []),
             "wa_bot": {},
             "chats": [],
+            "ai_settings": {},
         }
 
         if _blob_sync_enabled():
@@ -410,6 +424,7 @@ def delete_user_blobs(username: str) -> bool:
         try:
             with _connect() as conn:
                 conn.execute("DELETE FROM users WHERE username_lower = ?", (uname_lower,))
+                conn.execute("DELETE FROM consents WHERE subject_id = ?", ("user:" + uname_lower,))
                 conn.commit()
         except Exception:
             pass
@@ -719,6 +734,26 @@ def save_user_wa_bot(username_lower: str, wa_bot: dict) -> bool:
         if not rec:
             return False
         rec["wa_bot"] = dict(wa_bot) if isinstance(wa_bot, dict) else {}
+        return save_user_record(rec)
+
+
+def get_user_ai_settings(username_lower: str) -> dict:
+    """Kullanicinin kayitli AI saglayici, model ve sifreli API anahtari tercihlerini dondurur."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return {}
+        st = rec.get("ai_settings")
+        return dict(st) if isinstance(st, dict) else {}
+
+
+def save_user_ai_settings(username_lower: str, ai_settings: dict) -> bool:
+    """Kullanicinin AI saglayici ve model ayarlarini kalici olarak kaydeder."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False
+        rec["ai_settings"] = dict(ai_settings) if isinstance(ai_settings, dict) else {}
         return save_user_record(rec)
 
 

@@ -2,10 +2,12 @@
 Vercel sunucusuz fonksiyonu: Kullanici kayit, giris, cikis ve oturum dogrulama.
 
 Rotalar:
-  POST /api/auth/register
-  POST /api/auth/login
-  POST /api/auth/logout
-  GET  /api/auth/me
+  POST   /api/auth/register
+  POST   /api/auth/login
+  POST   /api/auth/logout
+  GET    /api/auth/me
+  POST   /api/auth/delete-account
+  DELETE /api/auth/account
 """
 import os
 import sys
@@ -76,7 +78,21 @@ class handler(BaseHTTPRequestHandler):
 
             if action == 'logout':
                 auth.logout_request(self.headers)
-                api_utils.send_json(self, 200, {'success': True}, methods='GET, POST, OPTIONS')
+                api_utils.send_json(self, 200, {'success': True}, methods='GET, POST, DELETE, OPTIONS')
+                return
+
+            if action == 'delete-account':
+                ok, payload_or_err, status = auth.delete_user_account(
+                    self.headers,
+                    password=data.get('password', ''),
+                    confirm=bool(data.get('confirm')),
+                )
+                if not ok:
+                    api_utils.send_json(self, status, {'error': payload_or_err},
+                                        methods='GET, POST, DELETE, OPTIONS')
+                    return
+                api_utils.send_json(self, status, {'success': True, **payload_or_err},
+                                    methods='GET, POST, DELETE, OPTIONS')
                 return
 
             ip = api_utils.client_ip(self.headers)
@@ -124,13 +140,46 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             api_utils.send_json(self, 404, {'error': 'Bilinmeyen kimlik dogrulama yolu'},
-                                methods='GET, POST, OPTIONS')
+                                methods='GET, POST, DELETE, OPTIONS')
         except Exception as e:
             api_utils.send_json(self, 500, {'error': api_utils.safe_error_message(e)},
-                                methods='GET, POST, OPTIONS')
+                                methods='GET, POST, DELETE, OPTIONS')
+
+    def do_DELETE(self):
+        try:
+            if api_utils.reject_disallowed_origin(self.headers):
+                api_utils.send_json(self, 403, {'error': 'Kaynak izni reddedildi.'},
+                                    methods='GET, POST, DELETE, OPTIONS')
+                return
+            action = self._action_name()
+            if action not in ('account', 'delete-account', 'me'):
+                api_utils.send_json(self, 404, {'error': 'Bilinmeyen kimlik dogrulama yolu'},
+                                    methods='GET, POST, DELETE, OPTIONS')
+                return
+            raw, err_status, err_msg = api_utils.read_body_limited(
+                self.rfile, self.headers, max_bytes=32 * 1024)
+            if err_status:
+                api_utils.send_json(self, err_status, {'error': err_msg},
+                                    methods='GET, POST, DELETE, OPTIONS')
+                return
+            data = api_utils.json_body(raw, {})
+            ok, payload_or_err, status = auth.delete_user_account(
+                self.headers,
+                password=data.get('password', ''),
+                confirm=bool(data.get('confirm')),
+            )
+            if not ok:
+                api_utils.send_json(self, status, {'error': payload_or_err},
+                                    methods='GET, POST, DELETE, OPTIONS')
+                return
+            api_utils.send_json(self, status, {'success': True, **payload_or_err},
+                                methods='GET, POST, DELETE, OPTIONS')
+        except Exception as e:
+            api_utils.send_json(self, 500, {'error': api_utils.safe_error_message(e)},
+                                methods='GET, POST, DELETE, OPTIONS')
 
     def do_OPTIONS(self):
-        api_utils.send_options(self, methods='GET, POST, OPTIONS')
+        api_utils.send_options(self, methods='GET, POST, DELETE, OPTIONS')
 
     def log_message(self, format, *args):
         pass

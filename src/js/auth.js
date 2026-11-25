@@ -93,6 +93,11 @@ function renderAuthUI() {
     showEl($('tts-workspace'), loggedIn);
     showEl($('ai-auth-lock'), !loggedIn);
     showEl($('ai-workspace'), loggedIn);
+    showEl($('settings-auth-lock'), !loggedIn);
+    showEl($('settings-workspace'), loggedIn);
+    if ($('settings-account-username')) {
+        $('settings-account-username').textContent = loggedIn ? ('@' + state.user.username) : '@misafir';
+    }
 }
 
 function applyQuotaSnapshot(snap) {
@@ -240,9 +245,10 @@ function completeAuthSuccess(data, toastMsg) {
     if (data.quota) applyQuotaSnapshot(data.quota);
     closeAuthModal();
     if (typeof loadSavedChats === 'function') loadSavedChats();
+    if (typeof loadAiSettings === 'function') loadAiSettings();
     var dest = state.authReturnTab || 'ai';
     state.authReturnTab = '';
-    if (dest !== 'tts' && dest !== 'ai') dest = 'ai';
+    if (dest !== 'tts' && dest !== 'ai' && dest !== 'settings') dest = 'ai';
     switchTab(dest);
     try { window.scrollTo({ top: 0, behavior: state.powerMode === 'eco' ? 'auto' : 'smooth' }); } catch (e) {}
     try {
@@ -382,8 +388,9 @@ async function logoutUser() {
     state.activeChatId = '';
     state.savedChats = [];
     if (typeof renderSavedChats === 'function') renderSavedChats();
+    if (typeof resetLocalAiSettingsState === 'function') resetLocalAiSettingsState();
     sfx('click');
-    showToast('Oturum kapatıldı.', 'info');
+    showToast('Oturum kapatıldı. İstediğiniz zaman tekrar giriş yapabilirsiniz.', 'info');
 }
 
 function handleAuthRequired(errMsg) {

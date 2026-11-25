@@ -532,6 +532,10 @@ button.action-btn:disabled { background: var(--border2); cursor: not-allowed; op
     color: var(--text);
     border: 1px solid var(--border);
 }
+.action-btn.danger {
+    background: var(--danger);
+    color: #fff;
+}
 .action-btn.small { width: auto; padding: 8px 13px; font-size: 12.5px; margin-top: 0; }
 
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -834,6 +838,15 @@ button.action-btn:disabled { background: var(--border2); cursor: not-allowed; op
 .attach-item img { max-width: 100%; max-height: 85px; border-radius: 6px; display: block; margin-bottom: 4px; }
 .attach-item .thumb { font-size: 20px; }
 
+.composer-dock {
+    position: sticky;
+    bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    z-index: 25;
+    background: var(--card);
+    padding-top: 4px;
+    border-radius: 16px;
+}
+
 .input-row.chat-composer {
     display: flex;
     align-items: flex-end;
@@ -1000,8 +1013,59 @@ button.action-btn:disabled { background: var(--border2); cursor: not-allowed; op
 .legal-content li { margin-bottom: 8px; }
 .legal-content strong { color: var(--text); }
 
+/* ============ SETTINGS PANEL & LEGAL MODAL ============ */
+.settings-section {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-top: 14px;
+}
+.settings-section h4 {
+    margin: 0;
+    font-size: 15.5px;
+    color: var(--text);
+}
+.settings-scope-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+}
+.settings-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted2);
+    cursor: pointer;
+}
+.settings-check input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+}
+.settings-danger-zone {
+    border-color: rgba(239, 68, 68, 0.35);
+}
+.legal-modal-card {
+    max-width: 780px;
+}
+.footer-about {
+    max-width: 760px;
+    margin: 0 auto 10px;
+    font-size: 12.5px;
+    color: var(--muted2);
+    line-height: 1.5;
+}
+
 footer.site-footer {
-    margin: 26px 0 calc(92px + env(safe-area-inset-bottom, 0px));
+    margin: 26px 0 calc(32px + env(safe-area-inset-bottom, 0px));
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
     text-align: center;
     font-size: 13px;
     color: var(--muted);
@@ -1098,7 +1162,22 @@ html[data-perf-tier="low"] .modal-card {
     }
     .tab-btn { min-width: 0; padding: 10px 6px; font-size: 13px; }
 
-    .chat-box { min-height: 250px; max-height: 52dvh; }
+    .chat-box { min-height: 240px; max-height: calc(100dvh - 300px); }
+    body.chat-tab-active footer.site-footer {
+        margin-bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+    }
+    .composer-dock {
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        bottom: calc(8px + env(safe-area-inset-bottom, 0px) + var(--kb-offset, 0px));
+        z-index: 900;
+        padding: 4px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border2);
+        box-shadow: var(--shadow);
+        border-radius: 18px;
+    }
     .msg { max-width: 96%; font-size: 13.5px; }
     #cookie-banner { padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px)); }
     #cookie-banner .cookie-text { min-width: 0; flex-basis: 100%; }
@@ -1109,7 +1188,8 @@ html[data-perf-tier="low"] .modal-card {
     .media-card { flex-direction: column; align-items: stretch; }
     .download-btn { width: 100%; }
     .legal-content { font-size: 14px; }
-    .input-row.chat-composer { padding: 6px 8px; gap: 5px; }
+
+.input-row.chat-composer { padding: 6px 8px; gap: 5px; }
     .chat-composer .tool-btn, .chat-composer .send-btn { width: 38px; height: 38px; min-height: 38px; flex: 0 0 38px; }
     .chat-composer .tool-btn.attach-btn { width: 34px; flex: 0 0 34px; }
     #toast-container { left: 12px; right: 12px; max-width: none; }

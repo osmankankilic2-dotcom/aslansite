@@ -265,3 +265,28 @@ def logout_request(headers) -> bool:
     ]
     database.save_user_record(rec)
     return True
+
+
+def delete_user_account(headers, password: str = "", confirm: bool = False):
+    """
+    Sifre ve acik onay dogrulamasiyla kullanici hesabini, tum oturumlarini,
+    sohbet gecmisini, ayarlarini ve bagli WhatsApp botunu kalici olarak siler.
+    """
+    rec, _ = authenticate_request(headers)
+    if not rec:
+        return False, "Bu işlem için giriş yapmalısınız.", 401
+    if not bool(confirm):
+        return False, "Hesap silme onayı gerekli.", 400
+    pw = str(password or "")
+    if not pw or not verify_password(pw, rec.get("password_hash", "")):
+        return False, "Şifre hatalı. Hesap silme işlemi iptal edildi.", 403
+
+    uname_lower = rec["username_lower"]
+    try:
+        from . import wa_bot
+        wa_bot.stop_user_bot(uname_lower, logout=True)
+    except Exception:
+        pass
+
+    database.delete_user_blobs(uname_lower)
+    return True, {"deleted": True, "username": rec["username"]}, 200

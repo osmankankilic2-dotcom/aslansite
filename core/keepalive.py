@@ -11,7 +11,7 @@ from . import config as cfg, wa_bot
 
 _WAKE_LOCK = threading.Lock()
 _LAST_WAKE_TS = 0.0
-_MIN_WAKE_INTERVAL = 30.0
+_MIN_WAKE_INTERVAL = 15.0
 
 
 def _collect_worker_targets() -> list:
@@ -29,7 +29,7 @@ def _collect_worker_targets() -> list:
 
 
 def _ping_targets_sync(targets: list) -> None:
-    req_timeout = 4.0 if os.environ.get('VERCEL') else 1.5
+    req_timeout = 6.0 if os.environ.get('VERCEL') else 1.5
     for url, tok in targets:
         try:
             headers = {'User-Agent': 'Aslan-AI-KeepAlive/1.0'}

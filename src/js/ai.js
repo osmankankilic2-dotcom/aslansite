@@ -729,6 +729,22 @@ function appendWaEventCard(ev) {
         return;
     }
 
+    if (ev.type === 'message_sent') {
+        var mWrap = document.createElement('div');
+        mWrap.className = 'msg bot';
+        mWrap.innerHTML =
+            '<div class="wa-card">' +
+                '<div class="wa-card-head">📤 WhatsApp Mesajı Gönderildi</div>' +
+                '<div class="wa-summary-list">' +
+                    '<span><strong>Hedef:</strong> ' + esc(ev.target_label || '') + (ev.is_group ? ' (Grup)' : '') + '</span><br>' +
+                    '<span><strong>Mesaj:</strong> ' + esc(ev.message || '') + '</span>' +
+                '</div>' +
+            '</div>';
+        box.appendChild(mWrap);
+        box.scrollTop = box.scrollHeight;
+        return;
+    }
+
     if ((ev.type === 'bot_ready' || ev.type === 'config_updated') && ev.config_summary) {
         var s = ev.config_summary;
         var sWrap = document.createElement('div');

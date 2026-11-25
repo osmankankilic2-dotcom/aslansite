@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, URL } from 'node:url';
 import makeWASocketImport, {
     Browsers,
     DisconnectReason,
@@ -114,6 +115,7 @@ function persistInstanceMeta(instance) {
         fs.writeFileSync(metaPath, JSON.stringify({
             userId: instance.userId,
             phone: instance.phone || '',
+            contacts: serializeContacts(instance),
             config: defaultConfig(instance.config),
             updatedAt: Date.now(),
         }), { encoding: 'utf-8', mode: 0o600 });
@@ -220,10 +222,166 @@ function findAutoReaction(textLower, reactions) {
     return '';
 }
 
+function isSafeCustomHttpsUrl(urlStr) {
+    try {
+        const s = String(urlStr || '').trim();
+        if (!s || s.length > 512) return false;
+        const u = new URL(s);
+        if (u.protocol !== 'https:') return false;
+        if (u.username || u.password) return false;
+        if (u.port && u.port !== '443' && u.port !== '8443') return false;
+        const host = String(u.hostname || '').toLowerCase().replace(/\.$/, '');
+        if (!host) return false;
+        if (
+            host === 'localhost' ||
+            host === 'metadata.google.internal' ||
+            host.endsWith('.local') ||
+            host.endsWith('.internal') ||
+            host.endsWith('.localhost')
+        ) {
+            return false;
+        }
+        if (net.isIP(host)) return false;
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function normalizeTurkishFold(s) {
+    return String(s || '')
+        .replace(/İ/g, 'i')
+        .replace(/I/g, 'ı')
+        .replace(/ı/g, 'i')
+        .replace(/Ş/gi, 's')
+        .replace(/Ğ/gi, 'g')
+        .replace(/Ü/gi, 'u')
+        .replace(/Ö/gi, 'o')
+        .replace(/Ç/gi, 'c')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+}
+
+function hydrateContacts(raw) {
+    const map = new Map();
+    for (const item of (Array.isArray(raw) ? raw : [])) {
+        if (!item || typeof item !== 'object') continue;
+        const jid = String(item.jid || item.id || '').trim();
+        if (!jid || jid === 'status@broadcast') continue;
+        map.set(jid, {
+            jid,
+            name: String(item.name || item.subject || '').trim(),
+            notify: String(item.notify || '').trim(),
+            isGroup: Boolean(item.isGroup || item.is_group || jid.endsWith('@g.us')),
+            updatedAt: Number(item.updatedAt || Date.now()),
+        });
+    }
+    return map;
+}
+
+function serializeContacts(instance) {
+    if (!instance || !(instance.contacts instanceof Map)) return [];
+    return Array.from(instance.contacts.values())
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+        .slice(0, 500);
+}
+
+function upsertContactEntry(instance, entry) {
+    if (!instance) return;
+    if (!(instance.contacts instanceof Map)) instance.contacts = new Map();
+    if (!entry || typeof entry !== 'object') return;
+    const jid = String(entry.jid || entry.id || '').trim();
+    if (!jid || jid === 'status@broadcast') return;
+    const prev = instance.contacts.get(jid) || {};
+    instance.contacts.set(jid, {
+        jid,
+        name: String(entry.name || entry.subject || prev.name || '').trim(),
+        notify: String(entry.notify || prev.notify || '').trim(),
+        isGroup: Boolean(entry.isGroup || entry.is_group || jid.endsWith('@g.us')),
+        updatedAt: Date.now(),
+    });
+    if (instance.contacts.size > 500) {
+        instance.contacts = hydrateContacts(serializeContacts(instance));
+    }
+}
+
+async function syncParticipatingGroups(instance, sock) {
+    if (!sock || typeof sock.groupFetchAllParticipating !== 'function') return;
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        if (groups && typeof groups === 'object') {
+            for (const [jid, meta] of Object.entries(groups)) {
+                if (!jid) continue;
+                upsertContactEntry(instance, { jid, name: (meta && meta.subject) || '', isGroup: true });
+            }
+        }
+    } catch (_) {}
+}
+
+function normalizePhoneTarget(rawTarget) {
+    const raw = String(rawTarget || '').trim();
+    if (!/^\+?[\d\s().-]{10,20}$/.test(raw)) return '';
+    let digits = raw.replace(/\D/g, '');
+    if (digits.length === 10 && digits.startsWith('5')) digits = '90' + digits;
+    else if (digits.length === 11 && digits.startsWith('05')) digits = '9' + digits;
+    return (digits.length >= 10 && digits.length <= 15) ? digits : '';
+}
+
+async function resolveTargetJid(instance, sock, rawTarget) {
+    const clean = String(rawTarget || '').trim();
+    if (!clean) return { ok: false, notFound: true, error: 'Hedef belirtilmedi.' };
+    if (clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) {
+        const hit = instance && instance.contacts ? instance.contacts.get(clean) : null;
+        return { ok: true, jid: clean, target_label: (hit && (hit.name || hit.notify)) || clean, is_group: clean.endsWith('@g.us') };
+    }
+    const digits = normalizePhoneTarget(clean);
+    if (digits) {
+        let jid = `${digits}@s.whatsapp.net`;
+        if (sock && typeof sock.onWhatsApp === 'function') {
+            try {
+                const res = await sock.onWhatsApp(digits);
+                if (Array.isArray(res) && res[0]) {
+                    if (res[0].exists === false) return { ok: false, notFound: true, error: 'Bu numara WhatsApp üzerinde kayıtlı görünmüyor.' };
+                    if (res[0].jid) jid = res[0].jid;
+                }
+            } catch (_) {}
+        }
+        const hit = instance && instance.contacts ? instance.contacts.get(jid) : null;
+        return { ok: true, jid, target_label: (hit && (hit.name || hit.notify)) || `+${digits}`, is_group: false };
+    }
+    if (sock) await syncParticipatingGroups(instance, sock);
+    const queryFold = normalizeTurkishFold(clean);
+    const entries = instance && instance.contacts instanceof Map ? Array.from(instance.contacts.values()) : [];
+    const exact = [], pref = [], sub = [];
+    for (const c of entries) {
+        const names = [normalizeTurkishFold(c.name || ''), normalizeTurkishFold(c.notify || '')].filter(Boolean);
+        if (!names.length) continue;
+        if (names.some((n) => n === queryFold)) exact.push(c);
+        else if (names.some((n) => n.startsWith(queryFold))) pref.push(c);
+        else if (names.some((n) => n.includes(queryFold))) sub.push(c);
+    }
+    const bucket = exact.length ? exact : (pref.length ? pref : sub);
+    if (!bucket.length) {
+        return { ok: false, notFound: true, error: `"${clean}" adıyla eşleşen kişi veya grup bulunamadı.` };
+    }
+    if (bucket.length > 1) {
+        return {
+            ok: false,
+            ambiguous: true,
+            candidates: bucket.slice(0, 6).map((c) => ({ jid: c.jid, name: c.name || c.notify || c.jid, is_group: Boolean(c.isGroup || String(c.jid).endsWith('@g.us')) })),
+            error: `"${clean}" için birden fazla eşleşme bulundu. Lütfen tam adını veya numarasını belirtin.`,
+        };
+    }
+    const chosen = bucket[0];
+    return { ok: true, jid: chosen.jid, target_label: chosen.name || chosen.notify || chosen.jid, is_group: Boolean(chosen.isGroup || String(chosen.jid).endsWith('@g.us')) };
+}
+
 async function callCustomAi(aiCfg, userText, cfg) {
-    const apiKey = String(aiCfg.api_key || '').trim();
-    if (!apiKey) return '';
-    const provider = String(aiCfg.provider || 'openai').toLowerCase();
+    const provider = String((aiCfg && aiCfg.provider) || 'openai').toLowerCase();
+    const apiKey = String((aiCfg && aiCfg.api_key) || '').trim();
+    if (!apiKey && provider !== 'custom') return '';
     const sysPrompt = [
         'Sen kullanicinin WhatsApp asistanisin.',
         cfg.tone ? `Uslup: ${cfg.tone}.` : '',
@@ -236,7 +394,12 @@ async function callCustomAi(aiCfg, userText, cfg) {
             const modelsToTry = Array.from(new Set([aiCfg.model || 'gemini-4-hydrogen', 'gemini-3.5-flash-lite']));
             for (const model of modelsToTry) {
                 try {
-                    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+                    const base = aiCfg.endpoint && isSafeCustomHttpsUrl(aiCfg.endpoint)
+                        ? aiCfg.endpoint.replace(/\/+$/, '')
+                        : 'https://generativelanguage.googleapis.com/v1beta/models';
+                    const url = base.toLowerCase().includes(':generatecontent')
+                        ? base
+                        : `${base}/${encodeURIComponent(model)}:generateContent`;
                     const res = await ipv4PostJson(url, {
                         contents: [{ role: 'user', parts: [{ text: userText }] }],
                         systemInstruction: { parts: [{ text: sysPrompt }] },
@@ -254,7 +417,8 @@ async function callCustomAi(aiCfg, userText, cfg) {
         }
 
         if (provider === 'anthropic') {
-            const res = await ipv4PostJson('https://api.anthropic.com/v1/messages', {
+            const ep = aiCfg.endpoint && isSafeCustomHttpsUrl(aiCfg.endpoint) ? aiCfg.endpoint : 'https://api.anthropic.com/v1/messages';
+            const res = await ipv4PostJson(ep, {
                 model: aiCfg.model || 'claude-3-5-haiku-latest',
                 max_tokens: 600,
                 system: sysPrompt,
@@ -270,7 +434,7 @@ async function callCustomAi(aiCfg, userText, cfg) {
             return '';
         }
 
-        let url = aiCfg.endpoint || 'https://api.openai.com/v1/chat/completions';
+        let url = 'https://api.openai.com/v1/chat/completions';
         let model = aiCfg.model || 'gpt-4o-mini';
         if (provider === 'groq') {
             url = aiCfg.endpoint || 'https://api.groq.com/openai/v1/chat/completions';
@@ -278,8 +442,25 @@ async function callCustomAi(aiCfg, userText, cfg) {
         } else if (provider === 'openrouter') {
             url = aiCfg.endpoint || 'https://openrouter.ai/api/v1/chat/completions';
             model = aiCfg.model || 'openai/gpt-4o-mini';
+        } else if (provider === 'deepseek') {
+            url = aiCfg.endpoint || 'https://api.deepseek.com/v1/chat/completions';
+            model = aiCfg.model || 'deepseek-chat';
+        } else if (provider === 'mistral') {
+            url = aiCfg.endpoint || 'https://api.mistral.ai/v1/chat/completions';
+            model = aiCfg.model || 'mistral-small-latest';
+        } else if (provider === 'custom') {
+            url = String(aiCfg.endpoint || '').trim();
+            if (!isSafeCustomHttpsUrl(url)) return '';
+            const lowEp = url.toLowerCase();
+            if (!['/chat/completions', '/completions', '/messages', '/responses', '/generate'].some((s) => lowEp.includes(s))) {
+                url = url.replace(/\/+$/, '') + '/chat/completions';
+            }
+        } else if (aiCfg.endpoint) {
+            url = aiCfg.endpoint;
         }
 
+        if (!isSafeCustomHttpsUrl(url)) return '';
+        const hdrs = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
         const res = await ipv4PostJson(url, {
             model,
             messages: [
@@ -288,11 +469,14 @@ async function callCustomAi(aiCfg, userText, cfg) {
             ],
             temperature: 0.7,
             max_tokens: 600,
-        }, { Authorization: `Bearer ${apiKey}` }, 25000);
+        }, hdrs, 25000);
 
         const choices = res.data && res.data.choices;
         if (Array.isArray(choices) && choices[0] && choices[0].message && choices[0].message.content) {
             return String(choices[0].message.content).trim();
+        }
+        if (res.data && typeof res.data.reply === 'string') {
+            return res.data.reply.trim();
         }
     } catch (_) {}
     return '';
@@ -356,7 +540,7 @@ async function handleIncomingMessage(instance, msg) {
     }
 
     let replyText = ruleReply;
-    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && cfg.custom_ai.api_key) {
+    if (!replyText && cfg.custom_ai && cfg.custom_ai.enabled && (cfg.custom_ai.api_key || (cfg.custom_ai.provider === 'custom' && cfg.custom_ai.endpoint))) {
         replyText = await callCustomAi(cfg.custom_ai, text, cfg);
     }
     if (!replyText && cfg.default_reply) {
@@ -381,6 +565,10 @@ async function handleIncomingMessage(instance, msg) {
 
 function closeSocketOnly(instance) {
     if (!instance) return;
+    if (instance.heartbeatTimer) {
+        clearInterval(instance.heartbeatTimer);
+        instance.heartbeatTimer = null;
+    }
     if (instance.reconnectTimer) {
         clearTimeout(instance.reconnectTimer);
         instance.reconnectTimer = null;
@@ -393,7 +581,30 @@ function closeSocketOnly(instance) {
     }
 }
 
+function scheduleWorkerReconnect(instance, delayMs = 3000) {
+    if (!instance || instance.stopped || instance.loggedOut) return;
+    if (instance.reconnectTimer || instance.reconnecting) return;
+    const waitMs = Math.max(400, Number(delayMs) || 3000);
+    instance.reconnectTimer = setTimeout(() => {
+        instance.reconnectTimer = null;
+        if (instance.stopped || instance.loggedOut) return;
+        instance.reconnecting = true;
+        instance.reconnectAttempts = (instance.reconnectAttempts || 0) + 1;
+        instance.reconnectCount = (instance.reconnectCount || 0) + 1;
+        openLiveSocket(instance)
+            .catch(() => {
+                const nextBackoff = Math.min(30000, 1500 * (2 ** Math.min(instance.reconnectAttempts || 1, 4)));
+                scheduleWorkerReconnect(instance, nextBackoff);
+            })
+            .finally(() => { instance.reconnecting = false; });
+    }, waitMs);
+}
+
 async function openLiveSocket(instance) {
+    if (instance.heartbeatTimer) {
+        clearInterval(instance.heartbeatTimer);
+        instance.heartbeatTimer = null;
+    }
     const sessionDir = userSessionDir(instance.userId);
     ensureDir(sessionDir);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -414,7 +625,46 @@ async function openLiveSocket(instance) {
 
     instance.sock = sock;
 
+    // 7/24 aktiflik icin 25 saniyelik WebSocket nabiz & kopma denetimi
+    instance.heartbeatTimer = setInterval(() => {
+        if (!instance || instance.stopped || instance.loggedOut) {
+            if (instance && instance.heartbeatTimer) {
+                clearInterval(instance.heartbeatTimer);
+                instance.heartbeatTimer = null;
+            }
+            return;
+        }
+        if (isSocketOpen(instance.sock)) {
+            pingSocket(instance.sock);
+            instance.lastKeepAliveAt = Date.now();
+        } else if (
+            !instance.reconnectTimer &&
+            !instance.reconnecting &&
+            (instance.connected || instance.status === 'reconnecting' || instance.status === 'disconnected' || (state && state.creds && state.creds.registered))
+        ) {
+            scheduleWorkerReconnect(instance, 1500);
+        }
+    }, 25000);
+    if (typeof instance.heartbeatTimer.unref === 'function') {
+        instance.heartbeatTimer.unref();
+    }
+
     sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('contacts.upsert', (list) => {
+        for (const c of (list || [])) upsertContactEntry(instance, { jid: c.id || c.jid, name: c.name || c.verifiedName || '', notify: c.notify || '', isGroup: false });
+        persistInstanceMeta(instance);
+    });
+    sock.ev.on('chats.upsert', (list) => {
+        for (const c of (list || [])) {
+            const jid = c.id || '';
+            upsertContactEntry(instance, { jid, name: c.name || c.subject || '', isGroup: jid.endsWith('@g.us') });
+        }
+        persistInstanceMeta(instance);
+    });
+    sock.ev.on('groups.upsert', (list) => {
+        for (const g of (list || [])) upsertContactEntry(instance, { jid: g.id, name: g.subject || '', isGroup: true });
+        persistInstanceMeta(instance);
+    });
 
     sock.ev.on('connection.update', (update) => {
         if (instance.stopped) return;
@@ -424,9 +674,11 @@ async function openLiveSocket(instance) {
             instance.connected = true;
             instance.loggedOut = false;
             instance.reconnecting = false;
+            instance.reconnectAttempts = 0;
             instance.connectedAt = Date.now();
+            instance.lastKeepAliveAt = Date.now();
             instance.pairingCode = null;
-            persistInstanceMeta(instance);
+            syncParticipatingGroups(instance, sock).finally(() => persistInstanceMeta(instance));
         } else if (connection === 'close') {
             const code = lastDisconnect && lastDisconnect.error
                 ? new Boom(lastDisconnect.error).output?.statusCode
@@ -439,18 +691,13 @@ async function openLiveSocket(instance) {
                 closeSocketOnly(instance);
             } else {
                 instance.status = instance.pairingCode ? 'pairing' : 'reconnecting';
-                if (!instance.reconnectTimer && !instance.reconnecting) {
-                    instance.reconnectTimer = setTimeout(() => {
-                        instance.reconnectTimer = null;
-                        if (!instance.stopped && !instance.loggedOut) {
-                            instance.reconnecting = true;
-                            instance.reconnectCount = (instance.reconnectCount || 0) + 1;
-                            openLiveSocket(instance)
-                                .catch(() => {})
-                                .finally(() => { instance.reconnecting = false; });
-                        }
-                    }, 3000);
-                }
+                const attempts = instance.reconnectAttempts || 0;
+                const backoffMs = code === DisconnectReason.restartRequired
+                    ? 500
+                    : (code === DisconnectReason.connectionReplaced
+                        ? 10000
+                        : Math.min(30000, 1000 * (2 ** Math.min(attempts, 5))));
+                scheduleWorkerReconnect(instance, backoffMs);
             }
         }
     });
@@ -458,6 +705,13 @@ async function openLiveSocket(instance) {
     sock.ev.on('messages.upsert', (ev) => {
         if (!ev || ev.type !== 'notify' || !Array.isArray(ev.messages)) return;
         for (const m of ev.messages) {
+            if (m && m.key && m.key.remoteJid && m.pushName && !m.key.fromMe) {
+                upsertContactEntry(instance, {
+                    jid: m.key.remoteJid,
+                    notify: m.pushName,
+                    isGroup: String(m.key.remoteJid).endsWith('@g.us'),
+                });
+            }
             handleIncomingMessage(instance, m).catch(() => {});
         }
     });
@@ -652,6 +906,89 @@ export async function stopBot(userId, logout = false) {
     return { success: true, status: inst.status, stopped: true };
 }
 
+export function getContacts(userId) {
+    const cleanUid = String(userId || '').trim();
+    const inst = instances.get(cleanUid);
+    if (!inst || !(inst.contacts instanceof Map)) return [];
+    return serializeContacts(inst).map((c) => ({
+        jid: c.jid,
+        name: c.name || c.notify || c.jid,
+        notify: c.notify || '',
+        is_group: Boolean(c.isGroup || String(c.jid).endsWith('@g.us')),
+    }));
+}
+
+export function setMockContacts(userId, contactsList = []) {
+    if (process.env.WA_MOCK_MODE !== '1') return { success: false, error: 'Devre dışı.' };
+    const cleanUid = String(userId || '').trim();
+    const inst = instances.get(cleanUid);
+    if (!inst) return { success: false, error: 'Oturum bulunamadı.' };
+    for (const c of (Array.isArray(contactsList) ? contactsList : [])) {
+        upsertContactEntry(inst, c);
+    }
+    return { success: true, count: inst.contacts.size };
+}
+
+export async function sendDirectMessage(userId, target, message) {
+    const cleanUid = String(userId || '').trim();
+    const cleanTarget = String(target || '').trim();
+    const cleanMsg = String(message || '').trim();
+    if (!cleanUid) return { success: false, error: 'Kullanıcı kimliği gerekli.' };
+    if (!cleanTarget) return { success: false, error: 'Hedef kişi, grup veya numara belirtilmelidir.' };
+    if (!cleanMsg) return { success: false, error: 'Mesaj metni boş olamaz.' };
+
+    const inst = instances.get(cleanUid);
+    if (!inst || !inst.connected || inst.loggedOut || inst.stopped) {
+        return { success: false, error: 'Bağlı WhatsApp oturumu bulunamadı.' };
+    }
+    const resolved = await resolveTargetJid(inst, inst.sock, cleanTarget);
+    if (!resolved.ok) {
+        return {
+            success: false,
+            error: resolved.error,
+            ambiguous: Boolean(resolved.ambiguous),
+            not_found: Boolean(resolved.notFound),
+            candidates: resolved.candidates || [],
+        };
+    }
+
+    if (process.env.WA_MOCK_MODE === '1') {
+        const msgId = 'mock_' + crypto.randomBytes(6).toString('hex');
+        if (!Array.isArray(inst.sentMessages)) inst.sentMessages = [];
+        const sentRec = {
+            jid: resolved.jid,
+            target_label: resolved.target_label,
+            is_group: resolved.is_group,
+            message: cleanMsg,
+            message_id: msgId,
+            sentAt: Date.now(),
+        };
+        inst.sentMessages.push(sentRec);
+        inst.lastMessageAt = Date.now();
+        return Object.assign({ success: true, sent: true }, sentRec);
+    }
+
+    if (!isSocketOpen(inst.sock)) {
+        return { success: false, error: 'WhatsApp soketi şu an açık değil, yeniden bağlanıyor.' };
+    }
+    try {
+        const sentObj = await inst.sock.sendMessage(resolved.jid, { text: cleanMsg });
+        inst.lastMessageAt = Date.now();
+        persistInstanceMeta(inst);
+        return {
+            success: true,
+            sent: true,
+            jid: resolved.jid,
+            target_label: resolved.target_label,
+            is_group: resolved.is_group,
+            message: cleanMsg,
+            message_id: String((sentObj && sentObj.key && sentObj.key.id) || ''),
+        };
+    } catch (_) {
+        return { success: false, error: 'WhatsApp mesajı gönderilemedi.' };
+    }
+}
+
 export function mockConnect(userId) {
     if (process.env.WA_MOCK_MODE !== '1') {
         return { success: false, error: 'Devre dışı.' };
@@ -735,6 +1072,7 @@ export async function restorePersistedBots() {
                     stopped: false,
                     reconnectTimer: null,
                     configUpdatesCount: 0,
+                    contacts: hydrateContacts(meta && meta.contacts),
                     config: defaultConfig(meta && meta.config),
                 };
                 instances.set(uid, inst);
