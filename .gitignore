@@ -7,3 +7,5 @@ __pycache__/
 server_dbg.py
 .DS_Store
 data/
+node_modules/
+worker/wa_service/auth_sessions/

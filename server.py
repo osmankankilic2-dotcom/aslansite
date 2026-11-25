@@ -24,10 +24,13 @@ from core import (
     blob_store,
     config as cfg,
     database,
+    keepalive,
     media_engine,
     pipeline,
     privacy,
     quota as quota_mod,
+    wa_bot,
+    worker_client,
 )
 
 cfg.ensure_dirs()
@@ -42,8 +45,6 @@ DEFAULT_VOICE = cfg.DEFAULT_VOICE
 MEDIA_TEMP_DIR = cfg.MEDIA_TEMP_DIR
 MAX_FILE_SIZE = cfg.MAX_FILE_SIZE
 AI_DAILY_LIMIT = cfg.AI_DAILY_LIMIT
-IMAGE_DAILY_LIMIT = cfg.IMAGE_DAILY_LIMIT
-IMAGE_WEEKLY_LIMIT = cfg.IMAGE_WEEKLY_LIMIT
 IMAGE_MONTHLY_LIMIT = cfg.IMAGE_MONTHLY_LIMIT
 SUPPORTED_MEDIA_OPERATIONS = media_engine.SUPPORTED_MEDIA_OPERATIONS
 
@@ -71,15 +72,29 @@ def _apply_security_and_cors(response):
     else:
         response.headers.setdefault(
             'Permissions-Policy',
-            'camera=(), geolocation=(), payment=(), usb=(), microphone=(self)',
+            'camera=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=(), microphone=(self)',
         )
-        response.headers.setdefault(
-            'Content-Security-Policy',
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        csp = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; "
-            "connect-src 'self' https:; font-src 'self' data:; object-src 'none'; "
-            "base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+            "connect-src 'self' https:; font-src 'self' data:; "
+            "worker-src 'self'; manifest-src 'self'; "
+            "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         )
+        if api_utils.is_https_request(request.headers):
+            csp += '; upgrade-insecure-requests'
+        response.headers['Content-Security-Policy'] = csp
+        if request.path == '/sw.js':
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Service-Worker-Allowed'] = '/'
+        elif request.path == '/manifest.json':
+            response.headers['Content-Type'] = 'application/manifest+json; charset=utf-8'
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+        elif request.path.startswith('/assets/'):
+            response.headers['Cache-Control'] = 'public, max-age=3600, must-revalidate'
+        elif (response.mimetype or '').startswith('text/html'):
+            response.headers['Content-Disposition'] = 'inline'
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
 
 
@@ -150,12 +165,21 @@ def index():
     return send_from_directory(str(PUBLIC_DIR), 'index.html')
 
 
+@app.route('/api/ping', methods=['GET', 'HEAD'])
+def api_ping():
+    """Kota tuketmeyen hafif uyanik tutma (keep-alive) ucu."""
+    if request.method == 'HEAD':
+        keepalive.touch_background_workers()
+        return '', 200
+    return jsonify(keepalive.ping_payload())
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Sistem saglik ve yetenek durumu."""
     return jsonify({
         'status': 'ok',
-        'service': 'ASLAN Technologies',
+        'service': 'Aslan AI',
         'capabilities': {
             'auth': True,
             'tts': True,
@@ -245,7 +269,7 @@ def tts():
         user, _ = auth.authenticate_request(request.headers)
         if not user:
             return jsonify({
-                'error': 'Metinden sese (TTS) özelliğini kullanmak için giriş yapmalısınız.',
+                'error': 'Aslan AI Ses Stüdyosu özelliğini kullanmak için giriş yapmalısınız.',
                 'auth_required': True,
             }), 401
 
@@ -279,9 +303,56 @@ def tts():
 
         response = send_file(io_bytes(audio), mimetype='audio/mpeg',
                              as_attachment=False, download_name='speech.mp3')
-        response.headers['X-Engine'] = engine_name or 'unknown'
+        response.headers['X-Engine'] = 'Aslan AI'
         response.headers['Cache-Control'] = 'private, max-age=300'
         return response
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/stt', methods=['POST'])
+def stt():
+    """Ses kaydini metne donusturur (giris zorunlu)."""
+    import binascii
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({
+                'error': 'Sesli mesaj dönüştürme için giriş yapmalısınız.',
+                'auth_required': True,
+            }), 401
+
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
+        audio_b64 = str(data.get('audio_base64') or data.get('data') or '').strip()
+        mime_type = str(data.get('mime_type') or 'audio/webm').strip().lower()
+        lang = str(data.get('lang') or 'tr-TR').strip()
+
+        if audio_b64.startswith('data:'):
+            audio_b64 = audio_b64.split(',', 1)[1] if ',' in audio_b64 else ''
+        if not audio_b64:
+            return _error('Ses verisi gerekli.', 400)
+        try:
+            audio_bytes = base64.b64decode(audio_b64, validate=False)
+        except (binascii.Error, ValueError):
+            return _error('Gecersiz ses verisi.', 400)
+        if not audio_bytes or len(audio_bytes) > cfg.MAX_JSON_BODY_BYTES:
+            return _error('Ses dosyasi bos veya cok buyuk.', 400)
+
+        ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+            get_client_ip(), 'stt', cfg.IP_STT_HOURLY_LIMIT, 3600)
+        if not ip_ok:
+            return _error(
+                'Cok fazla ses donusturme istegi. %d saniye sonra tekrar deneyin.'
+                % ip_usage.get('reset_in', 60),
+                429,
+            )
+
+        text, err = ai_engine.transcribe_audio(audio_bytes, mime_type=mime_type, lang=lang)
+        if not text:
+            return _error(api_utils.safe_error_message(err, 'Ses metne donusturulemedi.'), 502)
+        return jsonify({'success': True, 'text': text})
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 
@@ -291,6 +362,7 @@ def tts():
 def ai():
     """Aslan AI Asistan - giris zorunlu, hesaba bagli DB kotasi, coklu AI zinciri."""
     temp_inline_paths = []
+    created_outputs = []
     try:
         user, _ = auth.authenticate_request(request.headers)
         if not user:
@@ -302,6 +374,7 @@ def ai():
         message = ''
         files = []
         available_files = []
+        context_metas = []
         history = []
 
         if request.content_type and 'multipart/form-data' in request.content_type:
@@ -317,15 +390,42 @@ def ai():
                 history = []
         else:
             data = request.get_json(force=True, silent=True) or {}
+            if not isinstance(data, dict):
+                return _error('Gecersiz istek govdesi', 400)
             message = str(data.get('message', '') or '').strip()
-            available_files = list(data.get('available_files') or [])
-            history = data.get('history') or []
-            for i, entry in enumerate(data.get('files') or []):
+            available_files = data.get('available_files')
+            if available_files is None:
+                available_files = []
+            elif not isinstance(available_files, list):
+                return _error('Gecersiz available_files bicimi', 400)
+            else:
+                available_files = list(available_files)
+            history = data.get('history')
+            if not isinstance(history, list):
+                history = []
+            inline_req_files = data.get('files')
+            if inline_req_files is None:
+                inline_req_files = []
+            elif not isinstance(inline_req_files, list):
+                return _error('Gecersiz dosya listesi', 400)
+            context_inline = data.get('context_files')
+            if context_inline is None:
+                context_inline = []
+            elif not isinstance(context_inline, list):
+                return _error('Gecersiz baglam dosya listesi', 400)
+            if len(inline_req_files) + len(context_inline) > cfg.MAX_INLINE_FILES:
+                return _error('Tek istekte en fazla %d dosya eklenebilir.' % cfg.MAX_INLINE_FILES, 400)
+            for i, entry in enumerate(inline_req_files):
                 path, meta = pipeline.decode_inline_file(entry, i)
                 if path:
                     temp_inline_paths.append(path)
                     files.append(InlineFile(meta['name'], path, meta['mime_type']))
                     available_files.append(meta)
+            for i, entry in enumerate(context_inline):
+                path, meta = pipeline.decode_inline_file(entry, i + len(inline_req_files))
+                if path:
+                    temp_inline_paths.append(path)
+                    context_metas.append(meta)
 
         if len(message) > cfg.MAX_MESSAGE_CHARS:
             return _error('Mesaj en fazla %d karakter olabilir.' % cfg.MAX_MESSAGE_CHARS, 400)
@@ -333,26 +433,47 @@ def ai():
         if not message and not files:
             return _error('Mesaj veya dosya bos', 400)
 
-        # ---- Hesaba bagli DB kota kontrolu (harcamadan once kontrol) ----
+        # ---- Hesaba bagli DB kota kontrolu ve WhatsApp bot tek-hak akisi ----
         uname_lower = user['username_lower']
-        allowed, usage = database.check_user_ai_quota(uname_lower)
-        if not allowed:
-            snap = database.user_quota_snapshot(user)
-            return jsonify({
-                'error': ('Gunluk %d mesaj hakkiniz doldu. Hakkiniz %d saniye sonra yenilenir.'
-                          % (AI_DAILY_LIMIT, usage.get('reset_in', 0))),
-                'remaining': 0,
-                'quota': snap,
-            }), 429
+        wa_kind, needs_credit = wa_bot.should_consume_credit(uname_lower, message)
+        if needs_credit:
+            allowed, usage = database.check_user_ai_quota(uname_lower)
+            if not allowed:
+                snap = database.user_quota_snapshot(user)
+                return jsonify({
+                    'error': ('Gunluk %d mesaj hakkiniz doldu. Hakkiniz %d saniye sonra yenilenir.'
+                              % (AI_DAILY_LIMIT, usage.get('reset_in', 0))),
+                    'remaining': 0,
+                    'quota': snap,
+                }), 429
 
-        ip_ok, ip_usage = quota_mod.check_and_consume_ip(
-            get_client_ip(), 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
-        if not ip_ok:
-            return _error(
-                'Gunluk ag istek sinirina ulasildi. %d saniye sonra tekrar deneyin.'
-                % ip_usage.get('reset_in', 60),
-                429,
-            )
+            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                get_client_ip(), 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
+            if not ip_ok:
+                return _error(
+                    'Gunluk ag istek sinirina ulasildi. %d saniye sonra tekrar deneyin.'
+                    % ip_usage.get('reset_in', 60),
+                    429,
+                )
+
+        if wa_kind is not None:
+            def _charge_once():
+                if needs_credit:
+                    database.consume_user_ai_quota(uname_lower)
+            handled, wa_reply, wa_event, _ = wa_bot.handle_chat_turn(
+                uname_lower, message, consume_credit_fn=_charge_once)
+            if handled:
+                fresh_user = database.get_user_by_username(uname_lower) or user
+                snap = database.user_quota_snapshot(fresh_user)
+                return jsonify({
+                    'reply': wa_reply,
+                    'remaining': snap['ai']['remaining'],
+                    'quota': snap,
+                    'media_result': None,
+                    'image_result': None,
+                    'generated_images': [],
+                    'wa_event': wa_event,
+                })
 
         parts = []
         for file in files:
@@ -379,8 +500,9 @@ def ai():
                 parts.append({'text': '[Desteklenmeyen dosya turu: %s (%s)]'
                               % (file.filename, mime_type)})
 
+        all_available = available_files + context_metas
         reply, error = ai_engine.generate_reply(
-            message, parts=parts, available_files=available_files,
+            message, parts=parts, available_files=all_available,
             api_key=get_gemini_api_key(), history=history)
         if not reply:
             return _error(
@@ -394,16 +516,32 @@ def ai():
 
         media_result = None
         image_result = None
+        generated_images = []
+        wa_event = None
         action = ai_engine.extract_action(reply)
         if action:
             clean_reply = ai_engine.strip_action(reply)
-            media_result = ai_engine.run_action(
-                action, uploaded_files=available_files, username_lower=uname_lower)
+            media_result, generated_images, pipe_paths = ai_engine.run_action_pipeline(
+                action, uploaded_files=all_available, username_lower=uname_lower)
             if isinstance(media_result, dict):
+                keep_final = (
+                    not media_result.get('data_url')
+                    and str(media_result.get('download_url', '')).startswith('/api/media/download/')
+                    and media_result.get('output_file')
+                )
+                keep_base = os.path.basename(str(media_result.get('output_file', ''))) if keep_final else ''
+                created_outputs.extend([p for p in pipe_paths if os.path.basename(p) != keep_base])
                 if media_result.get('operation') == 'generate_image' and media_result.get('success'):
                     image_result = media_result
-                if media_result.get('success'):
+                elif media_result.get('operation') == 'wa_bot_update' and media_result.get('success'):
+                    wa_event = {'type': 'config_updated', 'config_summary': media_result.get('config_summary', {})}
+                    media_result = None
+                if media_result and media_result.get('success'):
                     reply = clean_reply or 'Islem tamamlandi.'
+                elif wa_event:
+                    reply = clean_reply or 'WhatsApp bot ayarları güncellendi.'
+            else:
+                created_outputs.extend(pipe_paths)
 
         fresh_user = database.get_user_by_username(uname_lower) or user
         snap = database.user_quota_snapshot(fresh_user)
@@ -413,11 +551,13 @@ def ai():
             'quota': snap,
             'media_result': media_result,
             'image_result': image_result,
+            'generated_images': generated_images,
+            'wa_event': wa_event,
         })
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
     finally:
-        pipeline.cleanup_files(temp_inline_paths)
+        pipeline.cleanup_files(temp_inline_paths + created_outputs)
 
 
 @app.route('/api/image', methods=['POST'])
@@ -465,7 +605,7 @@ def image_generate():
             'image_base64': result['image_base64'],
             'mime_type': result['mime_type'],
             'prompt': result['prompt'],
-            'engine': result.get('engine', 'gemini'),
+            'engine': 'Aslan AI',
             'quota': snap,
         })
     except Exception as e:
@@ -485,12 +625,13 @@ def quota_status():
             'account_bound': False,
             'ai': {'limit': cfg.AI_DAILY_LIMIT, 'used': 0, 'remaining': cfg.AI_DAILY_LIMIT},
             'image': {
-                'daily_limit': cfg.IMAGE_DAILY_LIMIT,
-                'weekly_limit': cfg.IMAGE_WEEKLY_LIMIT,
+                'limit': cfg.IMAGE_MONTHLY_LIMIT,
+                'used': 0,
+                'remaining': cfg.IMAGE_MONTHLY_LIMIT,
                 'monthly_limit': cfg.IMAGE_MONTHLY_LIMIT,
-                'daily_remaining': cfg.IMAGE_DAILY_LIMIT,
-                'weekly_remaining': cfg.IMAGE_WEEKLY_LIMIT,
+                'monthly_used': 0,
                 'monthly_remaining': cfg.IMAGE_MONTHLY_LIMIT,
+                'allowed': True,
             },
         })
     except Exception as e:
@@ -499,12 +640,36 @@ def quota_status():
 
 @app.route('/api/cookie-consent', methods=['POST'])
 def cookie_consent():
-    """Cerez onayi ve kategori tercihlerini kalici olarak saklar."""
+    """Cerez onayi ve kategori tercihlerini kalici olarak saklar (kabul sonrasi kilitlenir)."""
     try:
         data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
         consent = str(data.get('consent', '') or '').strip()
         if consent not in ('accepted', 'rejected', 'custom'):
             return _error('Gecersiz onay degeri', 400)
+
+        user, _ = auth.authenticate_request(request.headers)
+        subject_id = ('user:' + user['username_lower']) if user else get_device_id()
+        existing = database.get_consent_db(subject_id) or privacy.get_consent(subject_id)
+        if existing.get('consent') == 'accepted':
+            if consent != 'accepted':
+                return jsonify({
+                    'error': 'Çerez onayı daha önce kabul edildiği için değiştirilemez veya sıfırlanamaz.',
+                    'consent': 'accepted',
+                    'locked': True,
+                }), 409
+            existing_prefs = existing.get('preferences') or {
+                'necessary': True, 'functional': True, 'analytics': True
+            }
+            return jsonify({
+                'success': True,
+                'consent': 'accepted',
+                'preferences': existing_prefs,
+                'device_id': subject_id,
+                'timestamp': existing.get('timestamp'),
+                'locked': True,
+            })
 
         prefs = data.get('preferences') if isinstance(data.get('preferences'), dict) else {}
         clean_prefs = {
@@ -512,8 +677,6 @@ def cookie_consent():
             'functional': bool(prefs.get('functional', consent == 'accepted')),
             'analytics': bool(prefs.get('analytics', False)),
         }
-        user, _ = auth.authenticate_request(request.headers)
-        subject_id = ('user:' + user['username_lower']) if user else get_device_id()
         ip = get_client_ip()
         stored = database.store_consent_db(subject_id, consent, clean_prefs, ip=ip)
         privacy.store_consent(subject_id, consent, ip=ip)
@@ -523,6 +686,7 @@ def cookie_consent():
             'preferences': clean_prefs,
             'device_id': subject_id,
             'timestamp': stored.get('timestamp'),
+            'locked': (consent == 'accepted'),
         })
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
@@ -535,11 +699,13 @@ def cookie_consent_get():
         user, _ = auth.authenticate_request(request.headers)
         subject_id = ('user:' + user['username_lower']) if user else get_device_id()
         stored = database.get_consent_db(subject_id) or privacy.get_consent(subject_id)
+        consent_val = stored.get('consent', 'unknown')
         return jsonify({
-            'consent': stored.get('consent', 'unknown'),
+            'consent': consent_val,
             'preferences': stored.get('preferences', {}),
             'device_id': subject_id,
             'timestamp': stored.get('timestamp'),
+            'locked': (consent_val == 'accepted'),
         })
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
@@ -592,17 +758,41 @@ def media_process():
     temp_paths = []
     try:
         data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
         operation = data.get('operation')
-        file_ids = data.get('files', [])
-        params = data.get('params', {}) or {}
+        file_ids = data.get('files')
+        params = data.get('params')
+        if params is None:
+            params = {}
+        elif not isinstance(params, dict):
+            return _error('Gecersiz parametre bicimi', 400)
+        if not isinstance(file_ids, list) or not file_ids:
+            return _error('Islem ve dosya ID\'leri gerekli', 400)
+        if len(file_ids) > cfg.MAX_INLINE_FILES:
+            return _error('Tek istekte en fazla %d dosya islenebilir.' % cfg.MAX_INLINE_FILES, 400)
 
-        if not operation or not file_ids:
+        if not operation:
             return _error('Islem ve dosya ID\'leri gerekli', 400)
         if operation not in SUPPORTED_MEDIA_OPERATIONS:
             return _error('Bilinmeyen islem: %s' % operation, 400)
 
+        ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+            get_client_ip(), 'media', cfg.IP_MEDIA_HOURLY_LIMIT, 3600)
+        if not ip_ok:
+            return _error(
+                'Saatlik medya isleme sinirina ulasildi. %d saniye sonra tekrar deneyin.'
+                % ip_usage.get('reset_in', 60),
+                429,
+            )
+
         input_files = []
         if file_ids and isinstance(file_ids[0], dict):
+            if worker_client.is_enabled():
+                w_res = worker_client.call_media_process(operation, file_ids, params)
+                if not w_res.get('success'):
+                    return _error(api_utils.safe_error_message(w_res.get('error'), 'Aslan AI medya islemi tamamlanamadi.'), 502)
+                return jsonify(w_res)
             for i, entry in enumerate(file_ids):
                 path, _ = pipeline.decode_inline_file(entry, i)
                 if path:
@@ -721,7 +911,15 @@ def media_list():
 def media_cleanup():
     try:
         data = request.get_json(force=True, silent=True) or {}
-        max_age = data.get('max_age_hours', 24)
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
+        raw_age = data.get('max_age_hours', 24)
+        try:
+            max_age = float(raw_age)
+        except (TypeError, ValueError):
+            return _error('Gecersiz max_age_hours degeri', 400)
+        if max_age < 0 or max_age > 8760 or max_age != max_age:
+            return _error('max_age_hours 0 ile 8760 arasinda olmalidir', 400)
         cutoff = time.time() - (max_age * 3600)
 
         removed = []
@@ -731,6 +929,42 @@ def media_cleanup():
                 removed.append(f.name)
 
         return jsonify({'removed': removed, 'count': len(removed)})
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/status', methods=['GET'])
+def wa_status():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        return jsonify(wa_bot.get_status_snapshot(user['username_lower']))
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/confirm-connected', methods=['POST'])
+def wa_confirm_connected():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        res = wa_bot.confirm_connected(user['username_lower'])
+        return jsonify(res), (200 if res.get('success') else 400)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/wa/stop', methods=['POST'])
+def wa_stop():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Bu özellik için giriş yapmalısınız.', 'auth_required': True}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        res = wa_bot.stop_user_bot(user['username_lower'], logout=bool(data.get('logout')))
+        return jsonify(res)
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 

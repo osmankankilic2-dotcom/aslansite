@@ -15,7 +15,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import ai_engine, api_utils, auth, config as cfg, database, pipeline, quota as quota_mod
+from core import ai_engine, api_utils, auth, config as cfg, database, pipeline, quota as quota_mod, wa_bot
 
 cfg.ensure_dirs()
 AI_DAILY_LIMIT = cfg.AI_DAILY_LIMIT
@@ -64,8 +64,30 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            files_inline = data.get('files') or []
-            history = data.get('history') or []
+            files_inline = data.get('files')
+            if files_inline is None:
+                files_inline = []
+            if not isinstance(files_inline, list):
+                api_utils.send_json(self, 400, {'error': 'Gecersiz dosya listesi'},
+                                    methods='POST, OPTIONS')
+                return
+            context_inline = data.get('context_files')
+            if context_inline is None:
+                context_inline = []
+            if not isinstance(context_inline, list):
+                api_utils.send_json(self, 400, {'error': 'Gecersiz baglam dosya listesi'},
+                                    methods='POST, OPTIONS')
+                return
+            if len(files_inline) + len(context_inline) > cfg.MAX_INLINE_FILES:
+                api_utils.send_json(
+                    self, 400,
+                    {'error': 'Tek istekte en fazla %d dosya eklenebilir.' % cfg.MAX_INLINE_FILES},
+                    methods='POST, OPTIONS',
+                )
+                return
+            history = data.get('history')
+            if not isinstance(history, list):
+                history = []
 
             metas = []
             for i, entry in enumerate(files_inline):
@@ -74,39 +96,72 @@ class handler(BaseHTTPRequestHandler):
                     paths.append(path)
                     metas.append(meta)
 
-            if not message and not paths:
+            context_metas = []
+            for i, entry in enumerate(context_inline):
+                path, meta = self._decode_part(entry, i + len(metas))
+                if path:
+                    paths.append(path)
+                    context_metas.append(meta)
+
+            if not message and not metas:
                 api_utils.send_json(self, 400, {'error': 'Mesaj veya dosya bos'},
                                     methods='POST, OPTIONS')
                 return
 
-            # Hesaba bagli kalici DB kota kontrolu (harcamadan once kontrol)
+            # Hesaba bagli kalici DB kota kontrolu ve WhatsApp bot tek-hak akisi
             uname_lower = user['username_lower']
-            allowed, usage = database.check_user_ai_quota(uname_lower)
-            if not allowed:
-                snap = database.user_quota_snapshot(user)
-                api_utils.send_json(
-                    self, 429,
-                    {
-                        'error': ('Gunluk %d mesaj hakkiniz doldu. Hakkiniz %d saniye sonra yenilenir.'
-                                  % (AI_DAILY_LIMIT, usage.get('reset_in', 0))),
-                        'remaining': 0,
-                        'quota': snap,
-                    },
-                    methods='POST, OPTIONS',
-                )
-                return
+            wa_kind, needs_credit = wa_bot.should_consume_credit(uname_lower, message)
+            if needs_credit:
+                allowed, usage = database.check_user_ai_quota(uname_lower)
+                if not allowed:
+                    snap = database.user_quota_snapshot(user)
+                    api_utils.send_json(
+                        self, 429,
+                        {
+                            'error': ('Gunluk %d mesaj hakkiniz doldu. Hakkiniz %d saniye sonra yenilenir.'
+                                      % (AI_DAILY_LIMIT, usage.get('reset_in', 0))),
+                            'remaining': 0,
+                            'quota': snap,
+                        },
+                        methods='POST, OPTIONS',
+                    )
+                    return
 
-            ip = api_utils.client_ip(self.headers)
-            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
-                ip, 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
-            if not ip_ok:
-                api_utils.send_json(
-                    self, 429,
-                    {'error': 'Bu agdan gunluk istek sinirina ulasildi. Lutfen %d saniye sonra tekrar deneyin.'
-                              % ip_usage.get('reset_in', 60)},
-                    methods='POST, OPTIONS',
-                )
-                return
+                ip = api_utils.client_ip(self.headers)
+                ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                    ip, 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
+                if not ip_ok:
+                    api_utils.send_json(
+                        self, 429,
+                        {'error': 'Bu agdan gunluk istek sinirina ulasildi. Lutfen %d saniye sonra tekrar deneyin.'
+                                  % ip_usage.get('reset_in', 60)},
+                        methods='POST, OPTIONS',
+                    )
+                    return
+
+            if wa_kind is not None:
+                def _charge_once():
+                    if needs_credit:
+                        database.consume_user_ai_quota(uname_lower)
+                handled, wa_reply, wa_event, _ = wa_bot.handle_chat_turn(
+                    uname_lower, message, consume_credit_fn=_charge_once)
+                if handled:
+                    fresh_user = database.get_user_by_username(uname_lower) or user
+                    snap = database.user_quota_snapshot(fresh_user)
+                    api_utils.send_json(
+                        self, 200,
+                        {
+                            'reply': wa_reply,
+                            'remaining': snap['ai']['remaining'],
+                            'quota': snap,
+                            'media_result': None,
+                            'image_result': None,
+                            'generated_images': [],
+                            'wa_event': wa_event,
+                        },
+                        methods='POST, OPTIONS',
+                    )
+                    return
 
             parts = []
             for meta in metas:
@@ -133,8 +188,9 @@ class handler(BaseHTTPRequestHandler):
                     parts.append({'text': '[Desteklenmeyen dosya turu: %s (%s)]'
                                   % (meta['name'], mime_type)})
 
+            all_available = metas + context_metas
             reply, error = ai_engine.generate_reply(
-                message, parts=parts, available_files=metas,
+                message, parts=parts, available_files=all_available,
                 api_key=ai_engine.get_api_key(), history=history)
             if not reply:
                 api_utils.send_json(
@@ -149,22 +205,27 @@ class handler(BaseHTTPRequestHandler):
 
             media_result = None
             image_result = None
+            generated_images = []
+            wa_event = None
             action = ai_engine.extract_action(reply)
             if action:
                 clean_reply = ai_engine.strip_action(reply)
-                action = dict(action)
-                if not action.get('files'):
+                if isinstance(action, dict) and action.get('action') and not action.get('files'):
+                    action = dict(action)
                     action['files'] = [m['id'] for m in metas]
-                media_result = ai_engine.run_action(
-                    action, uploaded_files=metas, username_lower=uname_lower)
+                media_result, generated_images, pipe_paths = ai_engine.run_action_pipeline(
+                    action, uploaded_files=all_available, username_lower=uname_lower)
+                created_outputs.extend(pipe_paths)
                 if isinstance(media_result, dict):
-                    out_name = media_result.get('output_file')
-                    if out_name and out_name != 'aslan-gorsel.png':
-                        created_outputs.append(os.path.join(cfg.MEDIA_TEMP_DIR, os.path.basename(out_name)))
                     if media_result.get('operation') == 'generate_image' and media_result.get('success'):
                         image_result = media_result
-                    if media_result.get('success'):
+                    elif media_result.get('operation') == 'wa_bot_update' and media_result.get('success'):
+                        wa_event = {'type': 'config_updated', 'config_summary': media_result.get('config_summary', {})}
+                        media_result = None
+                    if media_result and media_result.get('success'):
                         reply = clean_reply or 'Islem tamamlandi.'
+                    elif wa_event:
+                        reply = clean_reply or 'WhatsApp bot ayarları güncellendi.'
 
             fresh_user = database.get_user_by_username(uname_lower) or user
             snap = database.user_quota_snapshot(fresh_user)
@@ -176,6 +237,8 @@ class handler(BaseHTTPRequestHandler):
                     'quota': snap,
                     'media_result': media_result,
                     'image_result': image_result,
+                    'generated_images': generated_images,
+                    'wa_event': wa_event,
                 },
                 methods='POST, OPTIONS',
             )

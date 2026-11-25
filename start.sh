@@ -32,6 +32,14 @@ if [ -z "$GEMINI_API_KEY" ]; then
     echo "   AI asistan Limited modda çalışacak."
 fi
 
+# Opsiyonel Aslan AI WhatsApp Servisi
+WA_PID=""
+if [ -d "$SCRIPT_DIR/worker/wa_service/node_modules/@whiskeysockets/baileys" ] && command -v node >/dev/null 2>&1; then
+    node "$SCRIPT_DIR/worker/wa_service/server.mjs" > /dev/null 2>&1 &
+    WA_PID=$!
+fi
+trap '[ -n "$WA_PID" ] && kill "$WA_PID" 2>/dev/null || true' EXIT INT TERM
+
 # Sunucuyu başlat
 echo "🚀 Sunucu başlatılıyor..."
 echo "   URL: http://localhost:$PORT"

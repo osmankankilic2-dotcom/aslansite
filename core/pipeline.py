@@ -17,19 +17,54 @@ davranisi gosterir.
 import base64
 import binascii
 import os
+import urllib.parse
 import uuid
 from pathlib import Path
 
 from .config import MEDIA_TEMP_DIR, MAX_FILE_SIZE
-from . import api_utils
+from . import api_utils, blob_store
 
 # Sonucun base64 olarak gonderilebilecegi maksimum boyut (~3 MB)
 MAX_INLINE_RESULT_BYTES = 3 * 1024 * 1024
 
 
+def _read_safe_source_url(source_url: str):
+    """Yalnizca yerel gecici ciktilardan veya guvenilir Vercel Blob URL'lerinden bayt okur."""
+    url = str(source_url or '').strip()
+    if not url:
+        return None, 'Dosya bos'
+    if url.startswith('/api/media/download/'):
+        fname = os.path.basename(url.split('?', 1)[0])
+        if not fname:
+            return None, 'Gecersiz dosya baglantisi'
+        candidate = Path(MEDIA_TEMP_DIR) / fname
+        if candidate.is_file():
+            try:
+                return candidate.read_bytes(), None
+            except OSError:
+                return None, 'Dosya okunamadi'
+        return None, 'Kaynak dosya sunucuda bulunamadi'
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None, 'Gecersiz kaynak baglantisi'
+
+    host = (parsed.hostname or '').lower()
+    if parsed.scheme == 'https' and (
+        host.endswith('.blob.vercel-storage.com') or host == 'blob.vercel-storage.com'
+    ):
+        raw_bytes = blob_store.fetch_url_bytes(url, timeout=20)
+        if raw_bytes:
+            return raw_bytes, None
+        return None, 'Uzak dosya indirilemedi'
+
+    return None, 'Gecersiz kaynak baglantisi'
+
+
 def decode_inline_file(entry, index=0):
     """
-    Istemciden gelen base64 dosya kaydini gecici dizine yazar.
+    Istemciden gelen base64 dosya kaydini (veya guvenli source_url kaydini) gecici dizine yazar.
 
     Returns: (dosya_yolu, meta_sozlugu) veya (None, hata_mesaji)
     """
@@ -40,14 +75,20 @@ def decode_inline_file(entry, index=0):
     mime_type = str(entry.get('mime_type') or entry.get('type') or
                     'application/octet-stream')
     raw = entry.get('data') or ''
+    source_url = entry.get('source_url') or ''
 
-    if isinstance(raw, str) and raw.startswith('data:'):
-        raw = raw.split(',', 1)[1] if ',' in raw else ''
-
-    try:
-        data = base64.b64decode(raw, validate=False) if raw else b''
-    except (binascii.Error, ValueError):
-        return None, 'Dosya verisi cozulemedi (gecersiz base64)'
+    data = b''
+    if raw:
+        if isinstance(raw, str) and raw.startswith('data:'):
+            raw = raw.split(',', 1)[1] if ',' in raw else ''
+        try:
+            data = base64.b64decode(raw, validate=False) if raw else b''
+        except (binascii.Error, ValueError):
+            return None, 'Dosya verisi cozulemedi (gecersiz base64)'
+    elif source_url:
+        data, src_err = _read_safe_source_url(source_url)
+        if src_err:
+            return None, src_err
 
     if not data:
         return None, 'Dosya bos'

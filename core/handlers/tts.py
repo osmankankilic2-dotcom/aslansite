@@ -25,7 +25,7 @@ class handler(BaseHTTPRequestHandler):
         headers_map = {
             'Content-Type': 'audio/mpeg',
             'Content-Length': str(len(audio_bytes)),
-            'X-Engine': engine_name or 'unknown',
+            'X-Engine': 'Aslan AI',
             'Cache-Control': 'private, max-age=300',
         }
         headers_map.update(api_utils.security_headers(is_api=False))
@@ -45,7 +45,7 @@ class handler(BaseHTTPRequestHandler):
             user, _ = auth.authenticate_request(self.headers)
             if not user:
                 api_utils.send_json(self, 401, {
-                    'error': 'Metinden sese (TTS) özelliğini kullanmak için giriş yapmalısınız.',
+                    'error': 'Aslan AI Ses Stüdyosu özelliğini kullanmak için giriş yapmalısınız.',
                     'auth_required': True,
                 }, methods='POST, OPTIONS')
                 return

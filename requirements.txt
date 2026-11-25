@@ -4,4 +4,4 @@ edge-tts>=7.3.1
 gtts>=2.5.0
 yt-dlp>=2024.12.13
 imageio-ffmpeg>=0.5.1
-static-ffmpeg>=2.5
+Pillow>=10.0.0

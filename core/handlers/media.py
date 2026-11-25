@@ -16,7 +16,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from core import api_utils, blob_store, config as cfg, media_engine, pipeline
+from core import api_utils, blob_store, config as cfg, media_engine, pipeline, quota as quota_mod, worker_client
 
 cfg.ensure_dirs()
 
@@ -60,8 +60,27 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             operation = str(data.get('operation') or '').strip()
-            params = data.get('params') or {}
-            inline = data.get('files') or []
+            params = data.get('params')
+            if params is None:
+                params = {}
+            elif not isinstance(params, dict):
+                api_utils.send_json(self, 400, {'error': 'Gecersiz parametre bicimi'},
+                                    methods='POST, OPTIONS')
+                return
+            inline = data.get('files')
+            if inline is None:
+                inline = []
+            elif not isinstance(inline, list):
+                api_utils.send_json(self, 400, {'error': 'Gecersiz dosya listesi'},
+                                    methods='POST, OPTIONS')
+                return
+            if len(inline) > cfg.MAX_INLINE_FILES:
+                api_utils.send_json(
+                    self, 400,
+                    {'error': 'Tek istekte en fazla %d dosya islenebilir.' % cfg.MAX_INLINE_FILES},
+                    methods='POST, OPTIONS',
+                )
+                return
 
             if not operation:
                 api_utils.send_json(self, 400, {'error': 'Islem gerekli'},
@@ -70,6 +89,30 @@ class handler(BaseHTTPRequestHandler):
             if operation not in SUPPORTED:
                 api_utils.send_json(self, 400, {'error': 'Bilinmeyen islem: %s' % operation},
                                     methods='POST, OPTIONS')
+                return
+
+            ip = api_utils.client_ip(self.headers)
+            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                ip, 'media', cfg.IP_MEDIA_HOURLY_LIMIT, 3600)
+            if not ip_ok:
+                api_utils.send_json(
+                    self, 429,
+                    {'error': 'Saatlik medya isleme sinirina ulasildi. %d saniye sonra tekrar deneyin.'
+                              % ip_usage.get('reset_in', 60)},
+                    methods='POST, OPTIONS',
+                )
+                return
+
+            if worker_client.is_enabled():
+                w_res = worker_client.call_media_process(operation, inline, params)
+                if not w_res.get('success'):
+                    api_utils.send_json(
+                        self, 502,
+                        {'error': api_utils.safe_error_message(w_res.get('error'), 'Aslan AI medya islemi tamamlanamadi.')},
+                        methods='POST, OPTIONS',
+                    )
+                    return
+                api_utils.send_json(self, 200, w_res, methods='POST, OPTIONS')
                 return
 
             for i, entry in enumerate(inline):

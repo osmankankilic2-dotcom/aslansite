@@ -7,6 +7,7 @@ Kalici kullanici, oturum, cerez tercihi ve hesap bazli kota veritabani.
   Boylece sayfa yenilendiginde, farkli tarayicidan girildiginde veya cerezler
   reddedildiginde kullanici verileri ve haklari asla kaybolmaz.
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -14,6 +15,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 
 from . import blob_store, config as cfg
 
@@ -134,12 +136,17 @@ def _connect() -> sqlite3.Connection:
             updated_at REAL NOT NULL,
             ver INTEGER NOT NULL DEFAULT 0,
             quota_json TEXT NOT NULL,
-            sessions_json TEXT NOT NULL
+            sessions_json TEXT NOT NULL,
+            wa_bot_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
     try:
         conn.execute("ALTER TABLE users ADD COLUMN ver INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN wa_bot_json TEXT NOT NULL DEFAULT '{}'")
     except sqlite3.OperationalError:
         pass
     conn.execute(
@@ -159,6 +166,11 @@ def _connect() -> sqlite3.Connection:
 
 def _row_to_dict(row) -> dict:
     keys = row.keys()
+    raw_wa = row["wa_bot_json"] if ("wa_bot_json" in keys and row["wa_bot_json"]) else "{}"
+    try:
+        wa_bot = json.loads(raw_wa) if isinstance(raw_wa, str) else {}
+    except Exception:
+        wa_bot = {}
     return {
         "username": row["username"],
         "username_lower": row["username_lower"],
@@ -168,21 +180,23 @@ def _row_to_dict(row) -> dict:
         "_ver": int(row["ver"]) if ("ver" in keys and row["ver"] is not None) else 0,
         "quota": json.loads(row["quota_json"] or "{}"),
         "sessions": json.loads(row["sessions_json"] or "[]"),
+        "wa_bot": wa_bot if isinstance(wa_bot, dict) else {},
     }
 
 
 def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
     conn.execute(
         """
-        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json, wa_bot_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(username_lower) DO UPDATE SET
             username=excluded.username,
             password_hash=excluded.password_hash,
             updated_at=excluded.updated_at,
             ver=excluded.ver,
             quota_json=excluded.quota_json,
-            sessions_json=excluded.sessions_json
+            sessions_json=excluded.sessions_json,
+            wa_bot_json=excluded.wa_bot_json
         """,
         (
             rec["username"],
@@ -193,18 +207,31 @@ def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
             int(rec.get("_ver") or 0),
             json.dumps(rec.get("quota") or {}, ensure_ascii=False),
             json.dumps(rec.get("sessions") or [], ensure_ascii=False),
+            json.dumps(rec.get("wa_bot") or {}, ensure_ascii=False),
         ),
     )
     conn.commit()
+
+
+def _current_month_key(now: float = None) -> str:
+    dt = datetime.fromtimestamp(float(now if now is not None else time.time()), tz=timezone.utc)
+    return dt.strftime("%Y-%m")
+
+
+def _next_month_reset_ts(now: float = None) -> float:
+    dt = datetime.fromtimestamp(float(now if now is not None else time.time()), tz=timezone.utc)
+    if dt.month == 12:
+        nxt = datetime(dt.year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    else:
+        nxt = datetime(dt.year, dt.month + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    return nxt.timestamp()
 
 
 def _initial_quota(now: float) -> dict:
     return {
         "ai": {"day": {"start": now, "count": 0}},
         "image": {
-            "day": {"start": now, "count": 0},
-            "week": {"start": now, "count": 0},
-            "month": {"start": now, "count": 0},
+            "month": {"month": _current_month_key(now), "start": now, "count": 0},
         },
     }
 
@@ -291,6 +318,7 @@ def create_user(username: str, password_hash: str, initial_sessions=None):
             "_ver": 0,
             "quota": _initial_quota(now),
             "sessions": list(initial_sessions or []),
+            "wa_bot": {},
         }
 
         if _blob_sync_enabled():
@@ -407,31 +435,53 @@ def _ai_status_from_quota(quota_obj: dict) -> dict:
     }
 
 
+def _image_month_bucket(quota_obj: dict, now: float = None) -> dict:
+    ts = float(now if now is not None else time.time())
+    cur_month = _current_month_key(ts)
+    img_map = quota_obj.setdefault("image", {})
+    img_map.pop("day", None)
+    img_map.pop("week", None)
+    bucket = img_map.get("month")
+    if not isinstance(bucket, dict):
+        bucket = {"month": cur_month, "start": ts, "count": 0}
+    elif bucket.get("month"):
+        if str(bucket.get("month")) != cur_month:
+            bucket = {"month": cur_month, "start": ts, "count": 0}
+    else:
+        try:
+            start_ts = float(bucket.get("start") or ts)
+        except (TypeError, ValueError):
+            start_ts = ts
+        if _current_month_key(start_ts) == cur_month:
+            bucket = {
+                "month": cur_month,
+                "start": start_ts,
+                "count": max(0, int(bucket.get("count", 0) or 0)),
+            }
+        else:
+            bucket = {"month": cur_month, "start": ts, "count": 0}
+    img_map["month"] = bucket
+    return bucket
+
+
 def _image_status_from_quota(quota_obj: dict) -> dict:
     now = time.time()
-    img_map = quota_obj.setdefault("image", {})
-    day = _bucket(img_map, "day", DAY)
-    week = _bucket(img_map, "week", WEEK)
-    month = _bucket(img_map, "month", MONTH)
-    d_used = max(0, int(day.get("count", 0) or 0))
-    w_used = max(0, int(week.get("count", 0) or 0))
+    month = _image_month_bucket(quota_obj, now=now)
+    cur_month = month.get("month") or _current_month_key(now)
     m_used = max(0, int(month.get("count", 0) or 0))
+    reset_at = _next_month_reset_ts(now)
+    remaining = max(0, cfg.IMAGE_MONTHLY_LIMIT - m_used)
     return {
-        "daily_limit": cfg.IMAGE_DAILY_LIMIT,
-        "weekly_limit": cfg.IMAGE_WEEKLY_LIMIT,
+        "month": cur_month,
+        "limit": cfg.IMAGE_MONTHLY_LIMIT,
+        "used": m_used,
+        "remaining": remaining,
         "monthly_limit": cfg.IMAGE_MONTHLY_LIMIT,
-        "daily_used": d_used,
-        "weekly_used": w_used,
         "monthly_used": m_used,
-        "daily_remaining": max(0, cfg.IMAGE_DAILY_LIMIT - d_used),
-        "weekly_remaining": max(0, cfg.IMAGE_WEEKLY_LIMIT - w_used),
-        "monthly_remaining": max(0, cfg.IMAGE_MONTHLY_LIMIT - m_used),
-        "allowed": (
-            d_used < cfg.IMAGE_DAILY_LIMIT
-            and w_used < cfg.IMAGE_WEEKLY_LIMIT
-            and m_used < cfg.IMAGE_MONTHLY_LIMIT
-        ),
-        "reset_in": max(0, int(float(day.get("start", now)) + DAY - now)),
+        "monthly_remaining": remaining,
+        "allowed": m_used < cfg.IMAGE_MONTHLY_LIMIT,
+        "reset_at": reset_at,
+        "reset_in": max(0, int(reset_at - now)),
     }
 
 
@@ -475,16 +525,20 @@ def check_user_image_quota(username_lower: str, amount: int = 1):
     with _DB_LOCK:
         rec = get_user_by_username(username_lower)
         if not rec:
-            return False, {"daily_limit": cfg.IMAGE_DAILY_LIMIT, "weekly_limit": cfg.IMAGE_WEEKLY_LIMIT,
-                           "monthly_limit": cfg.IMAGE_MONTHLY_LIMIT, "daily_remaining": 0,
-                           "weekly_remaining": 0, "monthly_remaining": 0, "allowed": False}
+            return False, {
+                "month": _current_month_key(),
+                "limit": cfg.IMAGE_MONTHLY_LIMIT,
+                "used": cfg.IMAGE_MONTHLY_LIMIT,
+                "remaining": 0,
+                "monthly_limit": cfg.IMAGE_MONTHLY_LIMIT,
+                "monthly_used": cfg.IMAGE_MONTHLY_LIMIT,
+                "monthly_remaining": 0,
+                "allowed": False,
+                "reset_in": 0,
+            }
         q = rec.setdefault("quota", _initial_quota(time.time()))
         status = _image_status_from_quota(q)
-        allowed = (
-            status["daily_used"] + amount <= cfg.IMAGE_DAILY_LIMIT
-            and status["weekly_used"] + amount <= cfg.IMAGE_WEEKLY_LIMIT
-            and status["monthly_used"] + amount <= cfg.IMAGE_MONTHLY_LIMIT
-        )
+        allowed = (status["monthly_used"] + int(amount)) <= cfg.IMAGE_MONTHLY_LIMIT
         return allowed, status
 
 
@@ -494,22 +548,11 @@ def consume_user_image_quota(username_lower: str, amount: int = 1):
         if not rec:
             return False, {}
         q = rec.setdefault("quota", _initial_quota(time.time()))
-        img = q.setdefault("image", {})
-        day = _bucket(img, "day", DAY)
-        week = _bucket(img, "week", WEEK)
-        month = _bucket(img, "month", MONTH)
-        d_u = max(0, int(day.get("count", 0) or 0))
-        w_u = max(0, int(week.get("count", 0) or 0))
+        month = _image_month_bucket(q)
         m_u = max(0, int(month.get("count", 0) or 0))
-        if (
-            d_u + amount > cfg.IMAGE_DAILY_LIMIT
-            or w_u + amount > cfg.IMAGE_WEEKLY_LIMIT
-            or m_u + amount > cfg.IMAGE_MONTHLY_LIMIT
-        ):
+        if m_u + int(amount) > cfg.IMAGE_MONTHLY_LIMIT:
             return False, _image_status_from_quota(q)
-        day["count"] = d_u + amount
-        week["count"] = w_u + amount
-        month["count"] = m_u + amount
+        month["count"] = m_u + int(amount)
         save_user_record(rec)
         return True, _image_status_from_quota(q)
 
@@ -551,3 +594,47 @@ def get_consent_db(subject_id: str) -> dict:
                 "preferences": json.loads(row["prefs_json"] or "{}"),
                 "timestamp": float(row["updated_at"]),
             }
+
+
+# ------------------------------------------------------------------ WhatsApp Bot & Sifreli Anahtar Yardimcilari
+def encrypt_secret_value(secret_str: str) -> str:
+    """Harici API anahtari gibi hassas degerleri Encrypt-then-MAC ile base64 metne sifreler."""
+    val = str(secret_str or "").strip()
+    if not val:
+        return ""
+    return base64.b64encode(encrypt_record({"v": val})).decode("ascii")
+
+
+def decrypt_secret_value(enc_str: str) -> str:
+    """encrypt_secret_value ile sifrelenmis degeri guvenli sekilde cozer."""
+    raw = str(enc_str or "").strip()
+    if not raw:
+        return ""
+    try:
+        blob = base64.b64decode(raw.encode("ascii"))
+    except Exception:
+        return ""
+    obj = decrypt_record(blob)
+    if isinstance(obj, dict) and isinstance(obj.get("v"), str):
+        return obj["v"]
+    return ""
+
+
+def get_user_wa_bot(username_lower: str) -> dict:
+    """Kullanicinin WhatsApp bot durum ve yapilandirmasini dondurur."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return {}
+        wb = rec.get("wa_bot")
+        return dict(wb) if isinstance(wb, dict) else {}
+
+
+def save_user_wa_bot(username_lower: str, wa_bot: dict) -> bool:
+    """Kullanicinin WhatsApp bot yapilandirmasini kalici olarak kaydeder."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False
+        rec["wa_bot"] = dict(wa_bot) if isinstance(wa_bot, dict) else {}
+        return save_user_record(rec)

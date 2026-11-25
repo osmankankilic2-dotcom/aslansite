@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import api_utils, config as cfg, database, media_engine
+from . import api_utils, config as cfg, database, media_engine, worker_client
 
 DEFAULT_VOICE = cfg.DEFAULT_VOICE
 TTS_MAX_CHARS = cfg.TTS_MAX_CHARS
@@ -99,38 +99,58 @@ def _sanitize_history(history) -> list:
 # ===================================================================== sistem istemi
 def build_system_prompt(available_files=None, extra_context=''):
     """Aslan AI sistem istemi (arayuzdeki ozellikleri ve otonom eylemleri anlatir)."""
-    prompt = """Sen Aslan AI'sin. Kendini her zaman "Aslan AI" olarak tanit; hicbir model veya saglayici adi kullanma. Turkce yanit ver, samimi ve profesyonel ol.
+    prompt = """Sen Aslan AI'sin. Kendini her zaman yalnizca "Aslan AI" olarak tanit. Kullaniciya verdigin yanitlarda arka planda kullanilan hicbir yapay zeka modeli, saglayici, API, kutuphane veya arac adini (Gemini, Pollinations, OpenAI, GPT, Mistral, Flux, Imagen, FFmpeg, yt-dlp, Baileys, edge-tts, gTTS, Pillow vb.) ASLA soyleme ve ima etme; tum yetenekleri yalnizca "Aslan AI" olarak sun. Turkce yanit ver, samimi ve profesyonel ol.
 
 ASLAN SITE OZELLIKLERI:
 - Ses Studyosu: Turkce/Ingilizce seslendirme (Ahmet/Emel/Andrew/Ava), hiz ve ton ayari, MP3 indirme
-- Aslan AI Asistan: Gorsel, ses, video ve PDF analizi; cok turlu sohbet ve otonom medya/TTS kontrolu
-- Medya Studyosu: Video birlestirme, kirpma, ses cikarma, sessize alma, hiz degistirme, ses sikistirma, gorsel ekleme, fotograf slaydi, ses temizleme
-- Gorsel Uretimi: Metinden gorsel olusturma (gunluk 3 / haftalik ve aylik toplam 5 hak)
-- Hesap & Kota: Kullanici hesabina bagli kalici kullanim haklari (gunluk 5 AI mesaji)
+- Aslan AI Asistan: Gorsel, ses, video ve PDF analizi; sesli mesajdan metne donusum; cok turlu sohbet ve otonom medya/TTS kontrolu
+- Aslan AI Medya Motoru: Video/gorsel/ses birlestirme, gorsel+ses video olusturma, metin bindirme (add_text), altyazi ekleme (burn_subtitles), filtreleme (apply_filter), kirpma, ses cikarma, sessize alma, hiz degistirme, fotograf slaydi, video baglantisindan medya indirme
+- Gorsel Uretimi: Metinden gorsel olusturma (kullanici basina aylik toplam 2 gorsel hakki)
+- Hesap & Kota: Kullanici hesabina bagli kalici kullanim haklari (gunluk 5 AI mesaji, aylik 2 gorsel)
 
-OTONOM EYLEM SISTEMI:
-Kullanicinin istegi bir medya/gorsel/ses islemini veya sesli okuma kontrolunu gerektiriyorsa,
-yanitinin sonuna asagidaki formatta TEK bir JSON blogu ekle:
+OTONOM EYLEM VE ZINCIRLEME SISTEMI:
+Kullanicinin istegi bir medya/gorsel/ses islemini veya cok adimli uretim/duzenlemeyi gerektiriyorsa,
+yanitinin sonuna asagidaki formatta TEK bir ```aslan_action``` JSON blogu ekle:
 
+Tek adim icin:
 ```aslan_action
 {
   "action": "<operation_name>",
-  "files": ["<dosya_id>"],
+  "files": ["<dosya_id_veya_$referans>"],
   "params": {"<param>": "value"}
 }
 ```
 
+Cok adimli uretim ve medya isleme zinciri icin (en fazla 5 adim):
+```aslan_action
+{
+  "steps": [
+    {"id": "img1", "action": "generate_image", "params": {"prompt": "..."}},
+    {"id": "img2", "action": "generate_image", "params": {"prompt": "..."}},
+    {"id": "vid1", "action": "slideshow_with_music", "files": ["$img1", "$img2"], "params": {"per_image_duration": 3, "transition": "fade"}}
+  ]
+}
+```
+Not: Onceki adimin ciktisini sonraki adimda "$id", "$prev", "$last_image", "$last_video" veya "$last_audio" ile referanslayabilirsin.
+
 Kullanilabilir action degerleri:
-- tts                    -> Metni seslendirir ve oynatir: {"action":"tts","files":[],"params":{"text":"...","voice":"tr-TR-AhmetNeural","rate":"+0%","pitch":"+0Hz","autoplay":true}}
-- tts_control            -> Ses studyosu ayarlarini ve oynatmayı kontrol eder (command: "play" | "stop" | "pause" | "settings"): {"action":"tts_control","files":[],"params":{"command":"stop","voice":"tr-TR-EmelNeural","rate":"+20%","pitch":"+4Hz","text":"..."}}
+- tts                    -> Metni seslendirir: {"action":"tts","files":[],"params":{"text":"...","voice":"tr-TR-AhmetNeural","rate":"+0%","pitch":"+0Hz","autoplay":true}}
+- tts_control            -> Ses studyosunu kontrol eder (command: "play" | "stop" | "pause" | "settings")
+- generate_image         -> Metinden gorsel uretir: {"action":"generate_image","files":[],"params":{"prompt":"..."}}
+- social_download        -> Video baglantisindan medya indirir (gizli sohbet yetenegi): {"action":"social_download","files":[],"params":{"url":"https://..."}}
+- wa_bot_update          -> Aktif WhatsApp bot ayarlarini canli gunceller: {"action":"wa_bot_update","files":[],"params":{"enabled":true,"allow_groups":false,"allow_private":true,"group_mode":"off","trigger_keywords":["..."],"ignored_keywords":["..."],"typing_delay_seconds":3,"show_typing":true,"tone":"...","instructions":"...","default_reply":"..."}}
+- image_audio_video      -> Gorsel + sesi videoya donusturur (files: [gorsel_id_veya_$last_image, ses_id_veya_$last_audio])
+- add_text               -> Gorsel veya videoya yazi ekler (params: text, position "top"|"center"|"bottom", font_size, color)
+- burn_subtitles         -> Videoya altyazi ekler (params: srt veya subtitles [{"start":0,"end":2.5,"text":"..."}])
+- apply_filter           -> Gorsel/videoya filtre uygular (params: filter "grayscale"|"sepia"|"blur"|"sharpen"|"vignette"|"vintage"|"warm"|"cool"|"invert"|"hflip"|"vflip")
 - merge_video_image      -> Videoya gorsel ekler (files: [video_id, gorsel_id])
-- crop_image             -> Gorsel kirpar (params: x, y, width, height)
+- crop_image             -> Gorsel/video kirpar (params: x, y, width, height)
 - trim_video             -> Video kirpar (params: start "00:00:05", duration 10)
 - extract_audio          -> Videodan ses cikarir (params: format "mp3")
-- combine_audio_video    -> Ses + video birlestirir (files: [video_id, ses_id])
-- overlay_audio          -> Videoya ses ekler (files: [video_id, ses_id])
-- stitch_media           -> Fotograf/video birlestirir (files: [id1, id2, ...])
-- slideshow_with_music   -> Fotograflardan + arka plan muzigiyle video (files: [foto1..fotoN, ses_id])
+- combine_audio_video    -> Ses + video/gorsel birlestirir (files: [video_veya_gorsel_id, ses_id])
+- overlay_audio          -> Videoya/gorsele ses ekler (files: [video_veya_gorsel_id, ses_id])
+- stitch_media           -> Fotograf/video birlestirir (files: [id1, id2, ...], params: transition "fade", per_image_duration 3)
+- slideshow_with_music   -> Fotograflar (+ varsa ses) -> MP4 slayt video (files: [foto1, foto2, ..., ses_id?])
 - video_concat           -> Iki videoyu birlestirir (files: [video1_id, video2_id])
 - merge_audio            -> Ses dosyalarini birlestirir (files: [ses1_id, ses2_id])
 - denoise_audio          -> Ses arka plan gurultusunu temizler (files: [ses_id])
@@ -142,13 +162,14 @@ Kullanilabilir action degerleri:
 - optimize_video         -> Videoyu sikistirir (files: [video_id])
 - convert                -> Format donusturur (params: format "mp4")
 - resize                 -> Yeniden boyutlandirir (params: width, height)
-- generate_image         -> Metinden gorsel uretir: {"action":"generate_image","files":[],"params":{"prompt":"..."}}
-- social_download        -> Video indirir: {"action":"social_download","files":[],"params":{"url":"https://..."}}
 
 KURALLAR:
-- Kullanici "bunu sesli oku", "hizi artir", "sesi Emel yap", "okumayi durdur" derse mutlaka uygun "tts" veya "tts_control" JSON blogunu ekle.
-- files icindeki degerler kullanicinin yukledigi dosyalarin kimlikleridir (asagida listelenir).
-- Slayt/video birlestirmede en fazla 10 fotograf kullanilabilir; dosya sirasi onemlidir.
+- Video indirme arayuzde gizlidir ancak sohbet icinde TAM AKTIFTIR: kullanici "Video indirebiliyor musun?" diye sorarsa olumlu yanit ver ("Evet, video bağlantısını paylaşırsanız Aslan AI ile indirebilir ve dilerseniz ardından kırpma, ses çıkarma veya yazı ekleme gibi düzenlemeler yapabilirim."), arka plan kutuphane/arac adlarini asla anma.
+- Kullanici video linki verip "bu videoyu indir" derse "social_download" kullan; sonraki mesajda "indirdigin videoyu kirp / sesini ayir / yazi ekle" derse listedeki mevcut dosya kimligini ($last_video veya yuklenen dosya id'sini) files icine yaz.
+- Kullanici "bunu sesli oku", "hizi artir", "sesi Emel yap", "okumayi durdur" derse uygun "tts" veya "tts_control" blogunu ekle.
+- Kullanici mevcut WhatsApp botunda ayar degisikligi isterse "wa_bot_update" action blogu kullan ve asla kutuphane/protokol adi soyleme.
+- Kullanici "iki gorsel uret, birlestirip video yap ve ses ekle" gibi cok adimli istekte bulunursa mutlaka "steps" dizisi kullan.
+- files icindeki degerler kullanicinin yukledigi/urettigi dosyalarin kimlikleridir (asagida listelenir) veya adim referanslaridir ($img1, $last_image, $last_video, $last_audio).
 - Eylem gerekmiyorsa aslan_action blogunu YAZMA.
 - Kullaniciya kisa, net ve yardimsever yanit ver.
 """
@@ -233,19 +254,20 @@ def _try_free_endpoints(message, history=None, available_files=None, parts=None)
 
     last_err = ''
 
-    # 1) Pollinations OpenAI-uyumlu acik uc noktasi
-    try:
-        data = _post_json(
-            cfg.POLLINATIONS_TEXT_OPENAI,
-            {'model': 'openai', 'messages': messages, 'temperature': 0.7},
-            timeout=18,
-        )
-        choices = data.get('choices') or []
-        content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
-        if _is_valid_free_reply(content):
-            return content, None
-    except Exception as e:
-        last_err = api_utils.safe_error_message(e)
+    # 1) Pollinations OpenAI-uyumlu acik uc noktasi (coklu ucretsiz model failover)
+    for free_model in getattr(cfg, 'POLLINATIONS_TEXT_MODELS', ('openai', 'mistral', 'openai-large')):
+        try:
+            data = _post_json(
+                cfg.POLLINATIONS_TEXT_OPENAI,
+                {'model': free_model, 'messages': messages, 'temperature': 0.7},
+                timeout=18,
+            )
+            choices = data.get('choices') or []
+            content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+            if _is_valid_free_reply(content):
+                return content, None
+        except Exception as e:
+            last_err = api_utils.safe_error_message(e)
 
     # 2) Pollinations dogrudan POST metin uc noktasi
     try:
@@ -283,7 +305,11 @@ def _try_free_endpoints(message, history=None, available_files=None, parts=None)
     # 4) Pollinations GET acik uc noktasi (kisa metin yedegi)
     try:
         user_msg = messages[-1]['content'][:1000]
-        sys_short = 'Sen Aslan AI sin. Turkce, kisa, samimi ve yardimsever yanit ver.'
+        sys_short = (
+            'Sen Aslan AI sin. Kendini yalnizca Aslan AI olarak tanit; '
+            'arka plandaki hicbir model, API veya kutuphane adini soyleme. '
+            'Turkce, kisa, samimi ve yardimsever yanit ver.'
+        )
         qs = urllib.parse.urlencode({'model': 'openai', 'system': sys_short})
         url = '%s/%s?%s' % (cfg.POLLINATIONS_TEXT_GET, urllib.parse.quote(user_msg, safe=''), qs)
         text = _get_raw_text(url, timeout=15).strip()
@@ -292,14 +318,14 @@ def _try_free_endpoints(message, history=None, available_files=None, parts=None)
     except Exception as e:
         last_err = api_utils.safe_error_message(e)
 
-    return None, last_err or 'Ucretsiz uc noktalar yanit vermedi'
+    return None, 'Aslan AI su an yanit veremedi. Lutfen tekrar deneyin.'
 
 
 def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, history=None):
     """Kullanicinin mevcut Gemini API yapilandirmasiyla yanit uretir (son durak / multimodal)."""
     key = api_key or get_api_key()
     if not key:
-        return None, 'API anahtari yapilandirilmamis'
+        return None, 'Aslan AI servisi su an kullanilamiyor.'
     contents = _build_contents(message, parts=parts, history=history)
     if not contents:
         return None, 'Mesaj bos'
@@ -311,27 +337,21 @@ def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, h
     }
     headers = {'x-goog-api-key': key}
     models = [GEMINI_TEXT_MODEL] + list(GEMINI_FALLBACK_MODELS)
-    last_error = 'Model yanit vermedi'
+    last_error = 'Aslan AI su an yanit vermedi.'
     for model in models:
         url = '%s/%s:generateContent' % (GEMINI_ENDPOINT, model)
         try:
             data = _post_json(url, payload, timeout=90, headers=headers)
-        except urllib.error.HTTPError as e:
-            body = ''
-            try:
-                body = e.read().decode('utf-8', errors='replace')[:200]
-            except Exception:
-                pass
-            last_error = 'AI servis hatasi (%s): %s' % (
-                e.code, api_utils.safe_error_message(body, 'istek reddedildi'))
+        except urllib.error.HTTPError:
+            last_error = 'Aslan AI gecici olarak yanit veremedi. Lutfen tekrar deneyin.'
             continue
-        except Exception as e:
-            last_error = 'Baglanti hatasi: %s' % api_utils.safe_error_message(e)
+        except Exception:
+            last_error = 'Aslan AI baglanti hatasi. Lutfen tekrar deneyin.'
             continue
         reply = _extract_text(data)
         if reply:
             return reply, None
-        last_error = 'Model yanit vermedi'
+        last_error = 'Aslan AI su an yanit vermedi.'
     return None, last_error
 
 
@@ -385,11 +405,115 @@ def _extract_text(data):
         return None
 
 
+# ===================================================================== ses -> metin (STT)
+def transcribe_audio(audio_bytes: bytes, mime_type: str = 'audio/webm', lang: str = 'tr-TR'):
+    """
+    Ses kaydini once ucretsiz uc nokta ile, gerekirse son durak Gemini API ile metne cevirir.
+
+    Returns: (metin, hata_mesaji)
+    """
+    if not audio_bytes:
+        return None, 'Ses verisi bos'
+    b64 = base64.b64encode(audio_bytes).decode('ascii')
+    ext_fmt = 'mp3'
+    low_mime = str(mime_type or '').lower()
+    if 'wav' in low_mime:
+        ext_fmt = 'wav'
+    elif 'ogg' in low_mime or 'opus' in low_mime:
+        ext_fmt = 'ogg'
+    elif 'webm' in low_mime:
+        ext_fmt = 'webm'
+    elif 'm4a' in low_mime or 'mp4' in low_mime:
+        ext_fmt = 'mp4'
+
+    instruction = (
+        'Bu ses kaydindaki konusmayi (%s) yalnizca birebir duz metin olarak yaz. '
+        'Yorum, baslik veya ek aciklama ekleme.' % (lang or 'tr-TR')
+    )
+    last_err = ''
+
+    try:
+        data = _post_json(
+            cfg.POLLINATIONS_TEXT_OPENAI,
+            {
+                'model': 'openai-audio',
+                'messages': [{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': instruction},
+                        {'type': 'input_audio', 'input_audio': {'data': b64, 'format': ext_fmt}},
+                    ],
+                }],
+            },
+            timeout=25,
+        )
+        choices = data.get('choices') or []
+        txt = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+        if _is_valid_free_reply(txt):
+            return txt, None
+    except Exception as e:
+        last_err = api_utils.safe_error_message(e)
+
+    key = get_api_key()
+    if key:
+        headers = {'x-goog-api-key': key}
+        payload = {
+            'contents': [{
+                'role': 'user',
+                'parts': [
+                    {'text': instruction},
+                    {'inline_data': {'mime_type': mime_type or 'audio/webm', 'data': b64}},
+                ],
+            }],
+            'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 1024},
+        }
+        for model in [GEMINI_TEXT_MODEL] + list(GEMINI_FALLBACK_MODELS):
+            try:
+                url = '%s/%s:generateContent' % (GEMINI_ENDPOINT, model)
+                data = _post_json(url, payload, timeout=45, headers=headers)
+                reply = _extract_text(data)
+                if reply:
+                    return reply.strip(), None
+            except Exception as e:
+                last_err = api_utils.safe_error_message(e)
+
+    return None, 'Aslan AI ses kaydini su an metne donusturemedi. Lutfen tekrar deneyin.'
+
+
 # ===================================================================== gorsel uretimi
+def _try_free_image_endpoints(prompt: str):
+    """Opsiyonel ucretsiz gorsel uretim uc noktalarini (FREE_IMAGE_ENDPOINTS) dener."""
+    extra = [u.strip() for u in os.environ.get('FREE_IMAGE_ENDPOINTS', '').split(',') if u.strip()]
+    for url in extra:
+        try:
+            data = json.dumps({'prompt': prompt}).encode('utf-8')
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={'Content-Type': 'application/json', 'User-Agent': 'ASLAN-Media/1.0'},
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                ctype = (resp.headers.get('Content-Type') or '').lower()
+                raw = resp.read()
+                if ctype.startswith('image/') and len(raw) >= 512:
+                    return base64.b64encode(raw).decode('ascii'), ctype
+                parsed = json.loads(raw.decode('utf-8', errors='replace'))
+                if isinstance(parsed, dict):
+                    b64 = parsed.get('image_base64') or parsed.get('b64_json') or ''
+                    if not b64 and isinstance(parsed.get('data_url'), str) and ',' in parsed['data_url']:
+                        b64 = parsed['data_url'].split(',', 1)[1]
+                    if b64:
+                        return b64, parsed.get('mime_type') or 'image/png'
+        except Exception:
+            continue
+    return None, None
+
+
 def generate_image(prompt, device_id=None, api_key=None, username_lower=None):
     """
-    Metinden gorsel uretir ve kota kontrolu yapar.
-    `username_lower` verilmisse kota dogrudan veritabanindaki kullanici hesabina baglanir.
+    Metinden gorsel uretir ve aylik kati 2 gorsel kotasi uygular.
+    Oncelik: 1) Ucretsiz Pollinations & acik uclar -> 2) Son durak Gemini/Imagen.
     Kota yalnizca uretim basarili olduktan sonra dusulur.
     """
     from . import quota
@@ -411,61 +535,68 @@ def generate_image(prompt, device_id=None, api_key=None, username_lower=None):
         return False, {
             'success': False,
             'quota_exceeded': True,
-            'error': ('Gunluk gorsel hakkiniz (%d) veya haftalik/aylik toplam hakkiniz (%d) doldu.'
-                      % (status.get('daily_limit', cfg.IMAGE_DAILY_LIMIT),
-                         status.get('weekly_limit', cfg.IMAGE_WEEKLY_LIMIT))),
+            'error': ('Bu ayki %d gorsel uretim hakkiniz doldu. Yeni ay basladiginda haklariniz yenilenir.'
+                      % status.get('monthly_limit', cfg.IMAGE_MONTHLY_LIMIT)),
             'quota': status,
         }
 
-    # Once ucretsiz Pollinations veya Gemini gorsel zinciri (kullanicinin gorsel kotasini korur)
+    # 1) Oncelikli: Ucretsiz/anahtarsiz Pollinations ve acik gorsel servisleri
     image_b64 = None
     mime = 'image/png'
     last_error = None
     engine = None
 
-    key = api_key or get_api_key()
-    headers = {'x-goog-api-key': key} if key else None
-
-    for model in (IMAGE_MODEL_CHAIN if key else ()):
-        if image_b64:
-            break
-        try:
-            if model.startswith('imagen'):
-                url = '%s/%s:predict' % (GEMINI_ENDPOINT, model)
-                payload = {'instances': [{'prompt': prompt}],
-                           'parameters': {'sampleCount': 1, 'aspectRatio': '1:1'}}
-                data = _post_json(url, payload, timeout=120, headers=headers)
-                for pred in data.get('predictions') or []:
-                    b64 = pred.get('bytesBase64Encoded')
-                    if b64:
-                        image_b64 = b64
-                        mime = pred.get('mimeType') or mime
-                        engine = model
-                        break
-            else:
-                url = '%s/%s:generateContent' % (GEMINI_ENDPOINT, model)
-                payload = {
-                    'contents': [{'parts': [{'text': prompt}]}],
-                    'generationConfig': {'responseModalities': ['IMAGE', 'TEXT']},
-                }
-                data = _post_json(url, payload, timeout=120, headers=headers)
-                for cand in data.get('candidates') or []:
-                    for part in ((cand.get('content') or {}).get('parts') or []):
-                        inline = part.get('inlineData') or part.get('inline_data')
-                        if inline and inline.get('data'):
-                            image_b64 = inline['data']
-                            mime = inline.get('mimeType') or inline.get('mime_type') or mime
-                            engine = model
-                            break
-                    if image_b64:
-                        break
-        except Exception as e:
-            last_error = api_utils.safe_error_message(e)
+    image_b64, free_mime, free_engine = _pollinations_image(prompt)
+    if image_b64:
+        mime = free_mime or mime
+        engine = free_engine or 'pollinations'
 
     if not image_b64:
-        image_b64, mime = _pollinations_image(prompt)
-        if image_b64:
-            engine = 'pollinations'
+        extra_b64, extra_mime = _try_free_image_endpoints(prompt)
+        if extra_b64:
+            image_b64 = extra_b64
+            mime = extra_mime or mime
+            engine = 'free-image'
+
+    # 2) Son Durak Yedek: Gemini / Imagen (yalnizca ucretsiz servisler basarisiz olursa)
+    key = api_key or get_api_key()
+    headers = {'x-goog-api-key': key} if key else None
+    if not image_b64 and key:
+        for model in IMAGE_MODEL_CHAIN:
+            if image_b64:
+                break
+            try:
+                if model.startswith('imagen'):
+                    url = '%s/%s:predict' % (GEMINI_ENDPOINT, model)
+                    payload = {'instances': [{'prompt': prompt}],
+                               'parameters': {'sampleCount': 1, 'aspectRatio': '1:1'}}
+                    data = _post_json(url, payload, timeout=120, headers=headers)
+                    for pred in data.get('predictions') or []:
+                        b64 = pred.get('bytesBase64Encoded')
+                        if b64:
+                            image_b64 = b64
+                            mime = pred.get('mimeType') or mime
+                            engine = model
+                            break
+                else:
+                    url = '%s/%s:generateContent' % (GEMINI_ENDPOINT, model)
+                    payload = {
+                        'contents': [{'parts': [{'text': prompt}]}],
+                        'generationConfig': {'responseModalities': ['IMAGE', 'TEXT']},
+                    }
+                    data = _post_json(url, payload, timeout=120, headers=headers)
+                    for cand in data.get('candidates') or []:
+                        for part in ((cand.get('content') or {}).get('parts') or []):
+                            inline = part.get('inlineData') or part.get('inline_data')
+                            if inline and inline.get('data'):
+                                image_b64 = inline['data']
+                                mime = inline.get('mimeType') or inline.get('mime_type') or mime
+                                engine = model
+                                break
+                        if image_b64:
+                            break
+            except Exception as e:
+                last_error = api_utils.safe_error_message(e)
 
     if not image_b64:
         cur_status = (database.check_user_image_quota(username_lower)[1]
@@ -473,7 +604,7 @@ def generate_image(prompt, device_id=None, api_key=None, username_lower=None):
         return False, {
             'success': False,
             'quota_exceeded': False,
-            'error': 'Gorsel uretilemedi%s' % (': %s' % last_error if last_error else ''),
+            'error': 'Aslan AI gorsel uretimi su an tamamlanamadi. Lutfen tekrar deneyin.',
             'quota': cur_status,
         }
 
@@ -488,26 +619,34 @@ def generate_image(prompt, device_id=None, api_key=None, username_lower=None):
         'mime_type': mime,
         'prompt': prompt,
         'quota': updated_status,
-        'engine': engine or 'gemini',
+        'engine': engine or 'pollinations',
     }
 
 
-def _pollinations_image(prompt, width=1024, height=1024, timeout=120):
-    """Anahtarsiz gorsel uretimi yedegi."""
-    try:
-        from urllib.parse import quote
-        url = '%s/%s?width=%d&height=%d&nologo=true&seed=%s' % (
-            POLLINATIONS_ENDPOINT, quote(prompt, safe=''), width, height,
-            str(abs(hash(prompt)) % 100000))
-        req = urllib.request.Request(url, headers={'User-Agent': 'ASLAN-Media/1.0'})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            blob = resp.read()
-            ctype = resp.headers.get('Content-Type') or 'image/jpeg'
-        if not blob or len(blob) < 512 or not ctype.startswith('image/'):
-            return None, None
-        return base64.b64encode(blob).decode('ascii'), ctype
-    except Exception:
-        return None, None
+def _pollinations_image(prompt, width=1024, height=1024, timeout=45):
+    """Anahtarsiz Pollinations gorsel uretimi (coklu model failover)."""
+    from urllib.parse import quote
+    models = getattr(cfg, 'POLLINATIONS_IMAGE_MODELS', ('flux', 'turbo', ''))
+    seed = str(abs(hash(prompt)) % 100000)
+    encoded = quote(prompt, safe='')
+    for idx, model_name in enumerate(models):
+        try:
+            url = '%s/%s?width=%d&height=%d&nologo=true&seed=%s' % (
+                POLLINATIONS_ENDPOINT, encoded, width, height, seed)
+            if model_name:
+                url += '&model=' + quote(model_name, safe='')
+            req = urllib.request.Request(url, headers={'User-Agent': 'ASLAN-Media/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                blob = resp.read()
+                ctype = (resp.headers.get('Content-Type') or 'image/jpeg').split(';', 1)[0].strip()
+            if blob and len(blob) >= 512 and ctype.startswith('image/'):
+                tag = ('pollinations/' + model_name) if model_name else 'pollinations'
+                return base64.b64encode(blob).decode('ascii'), ctype, tag
+        except Exception:
+            if idx + 1 >= len(models):
+                break
+            continue
+    return None, None, None
 
 
 # ===================================================================== TTS
@@ -595,23 +734,33 @@ def _try_gtts(text, lang='tr'):
 
 # ===================================================================== eylemler
 def extract_action(text):
-    """Yanit icindeki aslan_action JSON blogunu ayristirir (yoksa None)."""
+    """Yanit icindeki aslan_action JSON blogunu (tek eylem veya cok adimli steps) ayristirir."""
     if not text or 'aslan_action' not in text:
         return None
     match = re.search(r'```\s*aslan_action\s*(.*?)```', text, re.DOTALL)
     payload = match.group(1) if match else None
     if not payload:
-        brace = re.search(r'\{[^{}]*"action"\s*:.*?\}', text, re.DOTALL)
+        brace = re.search(r'\{.*"action"\s*:.*\}|\{.*"steps"\s*:.*\}', text, re.DOTALL)
         payload = brace.group(0) if brace else None
     if not payload:
         return None
     try:
-        action = json.loads(payload.strip())
+        parsed = json.loads(payload.strip())
     except (ValueError, TypeError):
         return None
-    if not isinstance(action, dict) or not action.get('action'):
-        return None
-    return action
+    if isinstance(parsed, list):
+        steps = [s for s in parsed if isinstance(s, dict) and s.get('action')]
+        return {'steps': steps} if steps else None
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get('steps'), list):
+            steps = [s for s in parsed['steps'] if isinstance(s, dict) and s.get('action')]
+            return {'steps': steps} if steps else None
+        if isinstance(parsed.get('actions'), list):
+            steps = [s for s in parsed['actions'] if isinstance(s, dict) and s.get('action')]
+            return {'steps': steps} if steps else None
+        if parsed.get('action'):
+            return parsed
+    return None
 
 
 def strip_action(text):
@@ -622,29 +771,8 @@ def strip_action(text):
 
 
 def resolve_file_paths(file_ids, uploaded_files=None):
-    """Dosya kimliklerini guvenli sekilde tam yola cevirir."""
-    from .config import MEDIA_TEMP_DIR
-    mapping = {}
-    for meta in (uploaded_files or []):
-        if not isinstance(meta, dict):
-            continue
-        fid = meta.get('id')
-        path = meta.get('path')
-        if fid and path and os.path.exists(path):
-            mapping[str(fid)] = path
-
-    paths = []
-    for fid in file_ids or []:
-        key = str(fid)
-        path = mapping.get(key)
-        if not path:
-            name = os.path.basename(key)
-            candidate = os.path.join(MEDIA_TEMP_DIR, name)
-            path = candidate if (os.path.exists(candidate)
-                                 and os.path.isfile(candidate)) else None
-        if path:
-            paths.append(path)
-    return paths
+    """Dosya kimliklerini guvenli sekilde tam yola cevirir (geriye donuk uyumluluk)."""
+    return _resolve_step_files(file_ids, uploaded_files=uploaded_files)
 
 
 def attach_download(descriptor, path):
@@ -676,64 +804,350 @@ def attach_download(descriptor, path):
     return descriptor
 
 
-def run_action(action, uploaded_files=None, device_id=None, username_lower=None):
-    """AI tarafindan istenen eylemi otonom olarak calistirir."""
-    action = action or {}
-    name = str(action.get('action', '')).strip()
-    params = action.get('params') or {}
-    file_ids = action.get('files') or []
+def _classify_path_kind(path: str, mime_hint: str = '') -> str:
+    m = str(mime_hint or '').lower()
+    ext = os.path.splitext(str(path or ''))[1].lower()
+    if m.startswith('image/') or ext in media_engine.IMAGE_EXTS:
+        return 'image'
+    if m.startswith('audio/') or ext in media_engine.AUDIO_EXTS:
+        return 'audio'
+    if m.startswith('video/') or ext in media_engine.VIDEO_EXTS:
+        return 'video'
+    return 'other'
 
-    if name == 'tts':
-        return run_tts_action(params)
 
-    if name == 'tts_control':
-        return run_tts_control_action(params)
+def _normalize_pipeline_steps(action_spec) -> list:
+    if isinstance(action_spec, list):
+        raw = action_spec
+    elif isinstance(action_spec, dict):
+        if isinstance(action_spec.get('steps'), list):
+            raw = action_spec['steps']
+        elif isinstance(action_spec.get('actions'), list):
+            raw = action_spec['actions']
+        elif action_spec.get('action'):
+            raw = [action_spec]
+        else:
+            raw = []
+    else:
+        raw = []
+    max_steps = getattr(cfg, 'MAX_AI_PIPELINE_STEPS', 5)
+    return [s for s in raw if isinstance(s, dict) and s.get('action')][:max_steps]
 
-    if name == 'generate_image':
-        prompt = str(params.get('prompt', '')).strip()
-        ok, result = generate_image(
-            prompt, device_id=device_id or 'anonymous', username_lower=username_lower)
-        if not ok:
-            return {'success': False, 'operation': name,
+
+def _resolve_step_files(file_ids, uploaded_files=None, step_paths=None):
+    """Hem yuklenen dosya ID'lerini hem de $id/$last_image/$last_video/$last_audio referanslarini cozer."""
+    step_paths = step_paths or {}
+    from .config import MEDIA_TEMP_DIR
+    mapping = {}
+    for meta in (uploaded_files or []):
+        if not isinstance(meta, dict):
+            continue
+        fid = meta.get('id')
+        path = meta.get('path')
+        if fid and path and os.path.exists(path):
+            mapping[str(fid)] = path
+
+    paths = []
+    for fid in file_ids or []:
+        key = str(fid).strip()
+        if not key:
+            continue
+        if key.startswith('$'):
+            ref_name = key[1:]
+            ref_path = step_paths.get(ref_name)
+            if ref_path and os.path.exists(ref_path):
+                paths.append(ref_path)
+            continue
+        path = mapping.get(key)
+        if not path:
+            name = os.path.basename(key)
+            candidate = os.path.join(MEDIA_TEMP_DIR, name)
+            path = candidate if (os.path.exists(candidate) and os.path.isfile(candidate)) else None
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _auto_select_media_files(op_name: str, step_paths: dict, uploaded_files=None) -> list:
+    """Eger model files alanini bos biraktiysa mevcut oturum/adim medyalarindan otomatik secer."""
+    all_imgs, all_vids, all_auds = [], [], []
+    for meta in (uploaded_files or []):
+        if not isinstance(meta, dict):
+            continue
+        p = meta.get('path')
+        if not p or not os.path.exists(p):
+            continue
+        k = _classify_path_kind(p, meta.get('mime_type') or meta.get('type') or '')
+        if k == 'image':
+            all_imgs.append(p)
+        elif k == 'video':
+            all_vids.append(p)
+        elif k == 'audio':
+            all_auds.append(p)
+
+    for k_ref, p in (step_paths or {}).items():
+        if not p or not os.path.exists(p):
+            continue
+        if k_ref in ('prev', 'last', 'last_image', 'last_video', 'last_audio'):
+            continue
+        kind = _classify_path_kind(p)
+        if kind == 'image' and p not in all_imgs:
+            all_imgs.append(p)
+        elif kind == 'video' and p not in all_vids:
+            all_vids.append(p)
+        elif kind == 'audio' and p not in all_auds:
+            all_auds.append(p)
+
+    if op_name in ('image_audio_video', 'combine_audio_video', 'overlay_audio'):
+        primary = step_paths.get('last_video') or step_paths.get('last_image') or (all_vids[-1] if all_vids else (all_imgs[-1] if all_imgs else ''))
+        aud = step_paths.get('last_audio') or (all_auds[-1] if all_auds else '')
+        return [x for x in (primary, aud) if x]
+
+    if op_name in ('slideshow_with_music', 'stitch_media'):
+        out = list(all_imgs[-cfg.MAX_SLIDESHOW_PHOTOS:])
+        if op_name == 'slideshow_with_music':
+            aud = step_paths.get('last_audio') or (all_auds[-1] if all_auds else '')
+            if aud:
+                out.append(aud)
+        elif len(out) < 2 and len(all_vids) >= 2:
+            return all_vids
+        return out
+
+    if op_name == 'merge_video_image':
+        v = step_paths.get('last_video') or (all_vids[-1] if all_vids else '')
+        im = step_paths.get('last_image') or (all_imgs[-1] if all_imgs else '')
+        return [x for x in (v, im) if x]
+
+    if op_name == 'video_concat':
+        return all_vids
+
+    if op_name == 'merge_audio':
+        return all_auds
+
+    if op_name in ('add_text', 'apply_filter', 'crop_image', 'resize', 'convert'):
+        cand = step_paths.get('prev') or step_paths.get('last_video') or step_paths.get('last_image')
+        if not cand:
+            cand = all_vids[-1] if all_vids else (all_imgs[-1] if all_imgs else '')
+        return [cand] if cand else []
+
+    if op_name in ('denoise_audio', 'compress_audio'):
+        cand = step_paths.get('last_audio') or (all_auds[-1] if all_auds else '')
+        return [cand] if cand else []
+
+    cand = step_paths.get('last_video') or (all_vids[-1] if all_vids else (step_paths.get('prev') or ''))
+    return [cand] if cand else []
+
+
+def _write_generated_image_temp(b64_str: str, mime: str) -> str:
+    import uuid
+    ext = '.jpg' if 'jpeg' in str(mime).lower() or 'jpg' in str(mime).lower() else '.png'
+    out_path = os.path.join(cfg.MEDIA_TEMP_DIR, 'ai_img_%s%s' % (uuid.uuid4().hex, ext))
+    with open(out_path, 'wb') as fh:
+        fh.write(base64.b64decode(b64_str))
+    return out_path
+
+
+def run_action_pipeline(action_spec, uploaded_files=None, device_id=None, username_lower=None):
+    """
+    Tek eylemi veya cok adimli AI -> FFmpeg/yt-dlp/TTS zincirini calistirir.
+
+    Returns: (final_result_dict, generated_images_list, created_temp_paths_list)
+    """
+    from . import quota
+
+    steps = _normalize_pipeline_steps(action_spec)
+    if not steps:
+        return {'success': False, 'operation': 'pipeline', 'error': 'Gecerli eylem adimi bulunamadi'}, [], []
+
+    # Cok adimli gorsel uretimi icin calistirmadan once toplam aylik kotayi dogrula
+    img_steps_count = sum(1 for s in steps if str(s.get('action', '')).strip() == 'generate_image')
+    if img_steps_count > 0:
+        if username_lower:
+            allowed, status = database.check_user_image_quota(username_lower, amount=img_steps_count)
+        else:
+            allowed, status = quota.check_image(device_id or 'anonymous', amount=img_steps_count)
+        if not allowed:
+            return {
+                'success': False,
+                'operation': 'generate_image' if img_steps_count == 1 else 'pipeline',
+                'quota_exceeded': True,
+                'error': ('Bu islem icin %d gorsel hakki gerekiyor; bu ay kalan hakkiniz: %d/%d.'
+                          % (img_steps_count, status.get('monthly_remaining', 0),
+                             status.get('monthly_limit', cfg.IMAGE_MONTHLY_LIMIT))),
+                'quota': status,
+            }, [], []
+
+    step_paths = {}
+    for meta in (uploaded_files or []):
+        if not isinstance(meta, dict):
+            continue
+        p = meta.get('path')
+        if not p or not os.path.exists(p):
+            continue
+        kind = _classify_path_kind(p, meta.get('mime_type') or meta.get('type') or '')
+        if kind == 'image':
+            step_paths['last_image'] = p
+        elif kind == 'video':
+            step_paths['last_video'] = p
+        elif kind == 'audio':
+            step_paths['last_audio'] = p
+        step_paths['last'] = p
+
+    created_paths = []
+    generated_images = []
+    last_result = None
+
+    for idx, step in enumerate(steps):
+        name = str(step.get('action', '')).strip()
+        step_id = str(step.get('id') or ('step_%d' % (idx + 1))).strip()
+        params = step.get('params') if isinstance(step.get('params'), dict) else {}
+        file_ids = step.get('files') if isinstance(step.get('files'), list) else []
+
+        if name == 'tts':
+            res = run_tts_action(params)
+            last_result = res
+            if res.get('success') and res.get('output_file'):
+                p = os.path.join(cfg.MEDIA_TEMP_DIR, os.path.basename(res['output_file']))
+                if os.path.exists(p):
+                    created_paths.append(p)
+                    step_paths[step_id] = p
+                    step_paths['prev'] = p
+                    step_paths['last'] = p
+                    step_paths['last_audio'] = p
+            if not res.get('success'):
+                return res, generated_images, created_paths
+            continue
+
+        if name == 'tts_control':
+            res = run_tts_control_action(params)
+            last_result = res
+            if not res.get('success'):
+                return res, generated_images, created_paths
+            continue
+
+        if name == 'wa_bot_update':
+            from . import wa_bot
+            res = wa_bot.apply_structured_update(username_lower, params)
+            last_result = res
+            if not res.get('success'):
+                return res, generated_images, created_paths
+            continue
+
+        if name == 'generate_image':
+            prompt = str(params.get('prompt', '')).strip()
+            ok, result = generate_image(
+                prompt, device_id=device_id or 'anonymous', username_lower=username_lower)
+            if not ok:
+                err_res = {
+                    'success': False,
+                    'operation': 'generate_image',
                     'error': result.get('error', 'Gorsel uretilemedi'),
-                    'quota': result.get('quota', {})}
-        b64 = result['image_base64']
-        mime = result['mime_type']
-        return {
-            'success': True,
-            'operation': 'generate_image',
-            'label': 'Görsel üretimi',
-            'image_base64': b64,
-            'mime_type': mime,
-            'data_url': 'data:%s;base64,%s' % (mime, b64),
-            'output_file': 'aslan-gorsel.png',
-            'prompt': result.get('prompt', ''),
-            'engine': result.get('engine', 'gemini'),
-            'quota': result.get('quota', {}),
-        }
+                    'quota': result.get('quota', {}),
+                }
+                return err_res, generated_images, created_paths
+            b64 = result['image_base64']
+            mime = result['mime_type']
+            img_desc = {
+                'success': True,
+                'operation': 'generate_image',
+                'label': 'Görsel üretimi',
+                'image_base64': b64,
+                'mime_type': mime,
+                'data_url': 'data:%s;base64,%s' % (mime, b64),
+                'output_file': 'aslan-gorsel-%d.png' % (len(generated_images) + 1),
+                'prompt': result.get('prompt', ''),
+                'engine': 'Aslan AI',
+                'quota': result.get('quota', {}),
+            }
+            generated_images.append(img_desc)
+            last_result = img_desc
+            try:
+                tmp_img = _write_generated_image_temp(b64, mime)
+                created_paths.append(tmp_img)
+                step_paths[step_id] = tmp_img
+                step_paths['prev'] = tmp_img
+                step_paths['last'] = tmp_img
+                step_paths['last_image'] = tmp_img
+            except Exception:
+                pass
+            continue
 
-    if name == 'social_download':
-        return run_social_download_action(params)
+        if name == 'social_download':
+            res = run_social_download_action(params)
+            last_result = res
+            if res.get('success') and res.get('output_file'):
+                p = os.path.join(cfg.MEDIA_TEMP_DIR, os.path.basename(res['output_file']))
+                if os.path.exists(p):
+                    created_paths.append(p)
+                    step_paths[step_id] = p
+                    step_paths['prev'] = p
+                    step_paths['last'] = p
+                    kind = _classify_path_kind(p, res.get('mime_type', ''))
+                    if kind == 'audio':
+                        step_paths['last_audio'] = p
+                    else:
+                        step_paths['last_video'] = p
+            if not res.get('success'):
+                return res, generated_images, created_paths
+            continue
 
-    if name in media_engine.SUPPORTED_MEDIA_OPERATIONS:
-        paths = resolve_file_paths(file_ids, uploaded_files)
-        if not paths:
-            return {'success': False, 'operation': name,
-                    'error': 'Bu islem icin gerekli dosya secilmedi.'}
-        out_path = media_engine.new_output_path(operation=name, params=params)
-        ok, result = media_engine.execute_media_operation(name, paths, out_path, params)
-        if ok:
+        if name in media_engine.SUPPORTED_MEDIA_OPERATIONS:
+            paths = _resolve_step_files(file_ids, uploaded_files=uploaded_files, step_paths=step_paths)
+            if not paths:
+                paths = _auto_select_media_files(name, step_paths, uploaded_files=uploaded_files)
+            if not paths:
+                return {
+                    'success': False,
+                    'operation': name,
+                    'error': 'Bu islem icin gerekli dosya secilmedi.',
+                }, generated_images, created_paths
+            out_path = media_engine.new_output_path(operation=name, params=params)
+            ok, result = media_engine.execute_media_operation(name, paths, out_path, params)
+            if not ok:
+                return {
+                    'success': False,
+                    'operation': name,
+                    'error': api_utils.safe_error_message(result),
+                }, generated_images, created_paths
+            res_str = str(result)
+            created_paths.append(res_str)
             descriptor = media_engine.result_descriptor(name, result)
             try:
                 descriptor['summary'] = media_engine.media_summary(result)
             except Exception:
                 pass
             attach_download(descriptor, result)
-            return descriptor
-        return {'success': False, 'operation': name,
-                'error': api_utils.safe_error_message(result)}
+            step_paths[step_id] = res_str
+            step_paths['prev'] = res_str
+            step_paths['last'] = res_str
+            kind = _classify_path_kind(res_str, descriptor.get('mime_type', ''))
+            if kind == 'image':
+                step_paths['last_image'] = res_str
+            elif kind == 'audio':
+                step_paths['last_audio'] = res_str
+            else:
+                step_paths['last_video'] = res_str
+            last_result = descriptor
+            continue
 
-    return {'success': False, 'operation': name, 'error': 'Bilinmeyen islem: %s' % name}
+        return {
+            'success': False,
+            'operation': name,
+            'error': 'Bilinmeyen islem: %s' % name,
+        }, generated_images, created_paths
+
+    return last_result, generated_images, created_paths
+
+
+def run_action(action, uploaded_files=None, device_id=None, username_lower=None):
+    """Tek veya cok adimli AI eylemini calistirir (geriye donuk uyumlu tek sonuc dondurur)."""
+    final_res, _, _ = run_action_pipeline(
+        action,
+        uploaded_files=uploaded_files,
+        device_id=device_id,
+        username_lower=username_lower,
+    )
+    return final_res or {'success': False, 'operation': '', 'error': 'Islem calistirilamadi'}
 
 
 def run_tts_control_action(params):
@@ -775,7 +1189,7 @@ def run_tts_action(params):
     audio, engine_name = synthesize_speech(text, voice, rate=rate, pitch=pitch)
     if not audio:
         return {'success': False, 'operation': 'tts',
-                'error': 'Ses uretilemedi (ses motoruna ulasilamadi)'}
+                'error': 'Aslan AI ses uretimi su an tamamlanamadi.'}
 
     fname = '%s.mp3' % uuid.uuid4().hex
     out_path = os.path.join(MEDIA_TEMP_DIR, fname)
@@ -792,7 +1206,7 @@ def run_tts_action(params):
     descriptor['rate'] = rate
     descriptor['pitch'] = pitch
     descriptor['autoplay'] = autoplay
-    descriptor['engine'] = engine_name
+    descriptor['engine'] = 'Aslan AI'
     attach_download(descriptor, out_path)
     return descriptor
 
@@ -824,11 +1238,14 @@ def download_social_media(url, params=None):
     url = clean_or_err
 
     params = params or {}
+    if worker_client.is_enabled():
+        return worker_client.call_social_download(url, params)
+
     try:
         import yt_dlp
     except ImportError:
         return {'success': False, 'operation': 'social_download',
-                'error': 'Video indirme motoru sunucuda kullanilamiyor (yt-dlp eksik)'}
+                'error': 'Aslan AI video indirme ozelligi su an kullanilamiyor.'}
 
     out_dir = os.path.join(MEDIA_TEMP_DIR, 'social')
     try:
@@ -842,12 +1259,16 @@ def download_social_media(url, params=None):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'cachedir': False,
         'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'merge_output_format': 'mp4',
         'socket_timeout': 30,
         'retries': 2,
         'max_filesize': cfg.MAX_FILE_SIZE,
     }
+    ff = media_engine.ffmpeg_path()
+    if ff:
+        options['ffmpeg_location'] = ff
     if params.get('audio_only'):
         options['format'] = 'bestaudio/best'
 
@@ -894,4 +1315,4 @@ def download_social_media(url, params=None):
             return descriptor
     except Exception as e:
         return {'success': False, 'operation': 'social_download',
-                'error': 'Video indirilemedi: %s' % api_utils.safe_error_message(e)}
+                'error': api_utils.safe_error_message(e, 'Video indirilemedi. Lutfen baglantiyi kontrol edip tekrar deneyin.')}

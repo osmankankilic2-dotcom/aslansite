@@ -15,6 +15,20 @@ from .privacy import device_identifier, fingerprint_seed
 _DEVICE_ID_RE = re.compile(r'^[a-zA-Z0-9_.:-]{4,128}$')
 _SAFE_EXT_RE = re.compile(r'^\.[a-z0-9]{1,8}$')
 _LOCAL_HOSTS = frozenset({'localhost', '127.0.0.1', '::1', '[::1]'})
+_BACKEND_LEAK_RE = re.compile(
+    r'\b(?:gemini|imagen|nano[-_ ]?banana|pollinations|googleapis|generativelanguage|'
+    r'openai|gpt-[0-9a-z.-]+|chatgpt|mistral|deepseek|llama|claude|anthropic|groq|'
+    r'hugging ?face|flux|stability|sdxl|ffmpeg|ffprobe|libav\w*|libx26\d|'
+    r'yt[-_ ]?dlp|youtube[-_ ]?dl|baileys|whiskeysockets|edge[-_ ]?tts|gtts|pillow|imageio|'
+    r'static[-_ ]?ffmpeg|vercel|flask|werkzeug|gunicorn|uvicorn|urllib|sqlite|'
+    r'turso|libsql|worker|pbkdf2|whisper|openrouter|replicate|cohere|perplexity)\b',
+    re.IGNORECASE,
+)
+_RAW_TECH_ERR_RE = re.compile(
+    r'(?:https?://\S+|traceback\s*\(|http error\s+\d{3}|urlerror|'
+    r'modulenotfounderror|importerror|filenotfounderror|calledprocesserror|\[errno\s+\d+\])',
+    re.IGNORECASE,
+)
 
 
 def _header(headers, name: str) -> str:
@@ -34,18 +48,28 @@ def _header(headers, name: str) -> str:
     return ''
 
 
+def _valid_ip(candidate: str) -> str:
+    """Aday metin gecerli bir IPv4/IPv6 adresi ise temiz metni dondurur, degilse ''."""
+    s = str(candidate or '').strip()
+    if not s:
+        return ''
+    try:
+        return str(ipaddress.ip_address(s))
+    except ValueError:
+        return ''
+
+
 def client_ip(headers) -> str:
     """Istegin gercek IP adresini dondurur (Vercel/Cloudflare basliklari desteklenir)."""
     try:
-        v_fwd = _header(headers, 'X-Vercel-Forwarded-For')
-        if v_fwd:
-            return v_fwd.split(',')[0].strip()
-        forwarded = _header(headers, 'X-Forwarded-For')
-        if forwarded:
-            return forwarded.split(',')[0].strip()
-        real = _header(headers, 'X-Real-IP')
-        if real:
-            return real.strip()
+        for header_name in ('X-Vercel-Forwarded-For', 'X-Forwarded-For', 'X-Real-IP'):
+            raw = _header(headers, header_name)
+            if not raw:
+                continue
+            for part in raw.split(','):
+                ip = _valid_ip(part)
+                if ip:
+                    return ip
         return '127.0.0.1'
     except Exception:
         return '127.0.0.1'
@@ -83,8 +107,21 @@ def request_device_id(headers) -> str:
         return device_identifier()
 
 
+def _parse_env_host(raw_val: str) -> str:
+    """VERCEL_URL gibi ortam degiskeninden alan adini (host) guvenli sekilde cikarir."""
+    val = str(raw_val or '').strip()
+    if not val:
+        return ''
+    if '://' in val:
+        try:
+            return (urlparse(val).hostname or '').lower().rstrip('.')
+        except Exception:
+            return ''
+    return val.split('/')[0].split(':')[0].lower().rstrip('.')
+
+
 def is_origin_allowed(origin: str, host: str = '') -> bool:
-    """Istegin Origin basliginin izinli kaynaklardan gelip gelmedigini denetler."""
+    """Istegin Origin/Referer basliginin izinli kaynaklardan gelip gelmedigini denetler."""
     origin = str(origin or '').strip()
     if not origin:
         return True
@@ -109,13 +146,16 @@ def is_origin_allowed(origin: str, host: str = '') -> bool:
     if req_hostname and origin_host == req_hostname:
         return True
 
-    if origin_host in _LOCAL_HOSTS:
+    if origin_host in _LOCAL_HOSTS and (not os.environ.get('VERCEL') or req_hostname in _LOCAL_HOSTS):
         return True
 
-    if origin_host == 'aslansite.vercel.app' or (
-        origin_host.endswith('.vercel.app') and origin_host.startswith('aslansite-')
-    ):
+    if origin_host == 'aslansite.vercel.app':
         return True
+
+    for env_key in ('VERCEL_URL', 'VERCEL_BRANCH_URL', 'VERCEL_PROJECT_PRODUCTION_URL'):
+        env_host = _parse_env_host(os.environ.get(env_key, ''))
+        if env_host and origin_host == env_host:
+            return True
 
     extra = os.environ.get('ALLOWED_ORIGINS', '')
     for item in extra.split(','):
@@ -129,19 +169,36 @@ def is_origin_allowed(origin: str, host: str = '') -> bool:
 
 
 def reject_disallowed_origin(headers) -> bool:
-    """Origin basligi varsa ve izinli listede degilse True dondurur."""
-    origin = _header(headers, 'Origin').strip()
-    if not origin:
-        return False
+    """Cross-site veya izin verilmeyen Origin/Referer baslikli istekleri reddeder."""
+    sec_fetch_site = _header(headers, 'Sec-Fetch-Site').strip().lower()
+    if sec_fetch_site == 'cross-site':
+        return True
+
     host = _header(headers, 'X-Forwarded-Host') or _header(headers, 'Host')
-    return not is_origin_allowed(origin, host)
+    origin = _header(headers, 'Origin').strip()
+    if origin:
+        return not is_origin_allowed(origin, host)
+
+    referer = _header(headers, 'Referer').strip()
+    if referer:
+        return not is_origin_allowed(referer, host)
+
+    return False
+
+
+def reject_cross_site_request(headers) -> bool:
+    """reject_disallowed_origin icin aciklayici takma ad."""
+    return reject_disallowed_origin(headers)
 
 
 def cors_headers(headers, methods: str = 'GET, POST, OPTIONS') -> dict:
     """Yalnizca izinli kaynaklar icin kontrollu CORS basliklari uretir."""
     out = {
         'Access-Control-Allow-Methods': methods,
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Auth-Token, X-Device-Id, X-Device-Seed',
+        'Access-Control-Allow-Headers': (
+            'Content-Type, Authorization, X-Auth-Token, '
+            'X-Device-Id, X-Device-Seed, X-Requested-With'
+        ),
         'Vary': 'Origin',
     }
     origin = _header(headers, 'Origin').strip()
@@ -158,6 +215,11 @@ def security_headers(is_api: bool = True) -> dict:
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',
         'Referrer-Policy': 'strict-origin-when-cross-origin',
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'X-Permitted-Cross-Domain-Policies': 'none',
+        'X-DNS-Prefetch-Control': 'off',
+        'X-Download-Options': 'noopen',
     }
     if is_api:
         headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, private'
@@ -244,17 +306,21 @@ def safe_extension(filename: str, allowed_exts=cfg.ALLOWED_UPLOAD_EXTS) -> str:
     return ext
 
 
-def safe_error_message(err, fallback: str = 'Beklenmeyen bir hata olustu.') -> str:
-    """Hata metninden API anahtarlari ve sunucu yollarini temizler."""
+def safe_error_message(err, fallback: str = 'Aslan AI islemi sirasinda beklenmeyen bir hata olustu.') -> str:
+    """Hata metninden API anahtarlari, sunucu yollari ve arka plan teknoloji adlarini temizler."""
     text = str(err or '').strip()
     if not text:
         return fallback
     text = re.sub(r'([?&]key=)[^&\s"\']+', r'\1[gizli]', text, flags=re.IGNORECASE)
     text = re.sub(r'AIza[0-9A-Za-z_-]{10,}', '[gizli-anahtar]', text)
     text = re.sub(r'gsk_[0-9A-Za-z_-]{10,}', '[gizli-anahtar]', text)
+    text = re.sub(r'sk-[0-9A-Za-z_-]{12,}', '[gizli-anahtar]', text)
     text = re.sub(r'vercel_blob_[0-9A-Za-z_-]+', '[gizli-anahtar]', text)
+    text = re.sub(r'aslan1\.[A-Za-z0-9_.-]+', '[gizli-jeton]', text)
     text = re.sub(r'(Bearer\s+)[0-9A-Za-z._-]+', r'\1[gizli]', text, flags=re.IGNORECASE)
     text = re.sub(r'(?:/data|/var/task|/tmp|/home)/[^\s\'"<>]+', '[yol]', text)
+    if _BACKEND_LEAK_RE.search(text) or _RAW_TECH_ERR_RE.search(text):
+        return fallback
     return text[:240] or fallback
 
 
@@ -339,7 +405,10 @@ def json_response(status: int, payload: dict, headers=None):
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': str(len(body)),
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Auth-Token, X-Device-Id, X-Device-Seed',
+        'Access-Control-Allow-Headers': (
+            'Content-Type, Authorization, X-Auth-Token, '
+            'X-Device-Id, X-Device-Seed, X-Requested-With'
+        ),
     }
     base.update(security_headers(is_api=True))
     if headers:

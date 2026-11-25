@@ -31,6 +31,7 @@ SUPPORTED_MEDIA_OPERATIONS = (
     'slideshow_with_music', 'video_concat', 'merge_audio', 'denoise_audio',
     'remove_background', 'extract_thumbnail', 'optimize_video',
     'compress_audio', 'mute_video', 'change_speed',
+    'image_audio_video', 'add_text', 'burn_subtitles', 'apply_filter',
 )
 
 OPERATION_LABELS = {
@@ -53,6 +54,10 @@ OPERATION_LABELS = {
     'compress_audio': 'Ses sıkıştırma',
     'mute_video': 'Videoyu sessize alma',
     'change_speed': 'Oynatma hızı değiştirme',
+    'image_audio_video': 'Görsel + ses video oluşturma',
+    'add_text': 'Metin ekleme',
+    'burn_subtitles': 'Altyazı ekleme',
+    'apply_filter': 'Görsel/video filtreleme',
     'tts': 'Metinden sese',
     'tts_control': 'Ses kontrolü',
     'social_download': 'Sosyal medya video indirme',
@@ -83,6 +88,10 @@ OPERATION_OUTPUT_EXT = {
     'compress_audio': '.mp3',
     'mute_video': '.mp4',
     'change_speed': '.mp4',
+    'image_audio_video': '.mp4',
+    'add_text': '.mp4',
+    'burn_subtitles': '.mp4',
+    'apply_filter': '.mp4',
 }
 
 CONVERT_EXT_MAP = {
@@ -163,14 +172,16 @@ def ffmpeg_available() -> bool:
 
 
 # ===================================================================== calistirma
-def run_ffmpeg(args, input_files=None, output_file=None, timeout=None):
+def run_ffmpeg(args, input_files=None, output_file=None, timeout=None, input_options=None):
     """ffmpeg komutunu calistirir. (basarili_mi, cikti_or_hata) dondurur."""
     if not ffmpeg_available():
-        return False, "Medya isleme motoru (ffmpeg) sunucuda bulunamadi"
+        return False, "Aslan AI medya isleme servisi su an kullanilamiyor."
     if timeout is None:
         timeout = 50 if os.environ.get('VERCEL') else 300
     cmd = [ffmpeg_path(), '-y', '-hide_banner', '-loglevel', 'error', '-threads', '2']
-    for f in (input_files or []):
+    for idx, f in enumerate(input_files or []):
+        if input_options and idx < len(input_options) and input_options[idx]:
+            cmd.extend([str(o) for o in input_options[idx]])
         cmd.extend(['-i', str(f)])
     cmd.extend([str(a) for a in args])
     if output_file:
@@ -336,6 +347,14 @@ def execute_media_operation(operation, input_files, output_path, params=None):
         return _op_mute_video(input_files, output_path)
     if operation == 'change_speed':
         return _op_change_speed(input_files, output_path, params)
+    if operation == 'image_audio_video':
+        return _op_image_audio_video(input_files, output_path, params)
+    if operation == 'add_text':
+        return _op_add_text(input_files, output_path, params)
+    if operation == 'burn_subtitles':
+        return _op_burn_subtitles(input_files, output_path, params)
+    if operation == 'apply_filter':
+        return _op_apply_filter(input_files, output_path, params)
     return False, "Bilinmeyen islem: %s" % operation
 
 
@@ -442,17 +461,65 @@ def _op_extract_audio(input_files, output_path, params):
     return True, out
 
 
-# ---------------------------------------------------------------- ses + video
+# ---------------------------------------------------------------- ses + video / gorsel
+def _split_media_roles(input_files):
+    videos, images, audios = [], [], []
+    for f in input_files:
+        ext = Path(f).suffix.lower()
+        if ext in IMAGE_EXTS:
+            images.append(f)
+        elif ext in AUDIO_EXTS:
+            audios.append(f)
+        elif ext in VIDEO_EXTS:
+            videos.append(f)
+        else:
+            info = get_media_info(f) or {}
+            types = [s.get('codec_type') for s in info.get('streams', [])]
+            if 'video' in types:
+                videos.append(f)
+            elif 'audio' in types:
+                audios.append(f)
+    return videos, images, audios
+
+
+def _op_image_audio_video(input_files, output_path, params=None):
+    """Tek gorsel + ses dosyasini MP4 videoya donusturur."""
+    videos, images, audios = _split_media_roles(input_files)
+    if images and audios:
+        img_file, aud_file = images[0], audios[0]
+        out = output_path.with_suffix('.mp4')
+        vf = 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p'
+        args = [
+            '-vf', vf, '-c:v', 'libx264', '-tune', 'stillimage',
+            '-preset', 'veryfast', '-r', '25', '-c:a', 'aac', '-b:a', '192k',
+            '-shortest', '-movflags', '+faststart',
+        ]
+        ok, res = run_ffmpeg(
+            args,
+            input_files=[img_file, aud_file],
+            output_file=str(out),
+            input_options=[['-loop', '1', '-framerate', '25'], []],
+        )
+        return (True, out) if ok else (False, res)
+    if videos and audios:
+        return _op_combine_audio_video([videos[0], audios[0]], output_path)
+    return False, "Gorsel/video ve ses dosyasi gerekli"
+
+
 def _op_combine_audio_video(input_files, output_path):
     if len(input_files) < 2:
-        return False, "Ses ve video dosyasi gerekli (sira: video, ses)"
+        return False, "Ses ve video dosyasi gerekli"
+    videos, images, audios = _split_media_roles(input_files)
+    if images and audios and not videos:
+        return _op_image_audio_video([images[0], audios[0]], output_path)
+    ordered = [videos[0], audios[0]] if (videos and audios) else input_files[:2]
     out = output_path.with_suffix('.mp4')
-    args = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest']
-    ok, res = run_ffmpeg(args, input_files=input_files, output_file=str(out))
+    args = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart']
+    ok, res = run_ffmpeg(args, input_files=ordered, output_file=str(out))
     if not ok:
         args_re = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264',
-                   '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest']
-        ok, res = run_ffmpeg(args_re, input_files=input_files, output_file=str(out))
+                   '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-movflags', '+faststart']
+        ok, res = run_ffmpeg(args_re, input_files=ordered, output_file=str(out))
     if not ok:
         return False, res
     info = get_media_info(str(out))
@@ -464,14 +531,18 @@ def _op_combine_audio_video(input_files, output_path):
 
 def _op_overlay_audio(input_files, output_path):
     if len(input_files) < 2:
-        return False, "Video ve ses dosyasi gerekli (sira: video, ses)"
+        return False, "Video/gorsel ve ses dosyasi gerekli"
+    videos, images, audios = _split_media_roles(input_files)
+    if images and audios and not videos:
+        return _op_image_audio_video([images[0], audios[0]], output_path)
+    ordered = [videos[0], audios[0]] if (videos and audios) else input_files[:2]
     out = output_path.with_suffix('.mp4')
-    args = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest']
-    ok, res = run_ffmpeg(args, input_files=input_files, output_file=str(out))
+    args = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart']
+    ok, res = run_ffmpeg(args, input_files=ordered, output_file=str(out))
     if not ok:
         args_re = ['-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264',
-                   '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest']
-        ok, res = run_ffmpeg(args_re, input_files=input_files, output_file=str(out))
+                   '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-movflags', '+faststart']
+        ok, res = run_ffmpeg(args_re, input_files=ordered, output_file=str(out))
     return (True, out) if ok else (False, res)
 
 
@@ -486,18 +557,23 @@ def _op_stitch_media(input_files, output_path, params):
         return False, "En az 2 dosya gerekli"
 
     is_image = [Path(f).suffix.lower() in IMAGE_EXTS for f in input_files]
+    is_audio = [Path(f).suffix.lower() in AUDIO_EXTS for f in input_files]
     out = output_path.with_suffix('.mp4')
+
+    if any(is_image) and any(is_audio) and all(a or b for a, b in zip(is_image, is_audio)):
+        return _op_slideshow_with_music(input_files, out, params)
 
     if all(is_image):
         if len(input_files) > MAX_SLIDESHOW_PHOTOS:
             return False, "En fazla %d fotograf kullanilabilir" % MAX_SLIDESHOW_PHOTOS
         parts = []
+        in_opts = []
         for i in range(len(input_files)):
+            in_opts.append(['-loop', '1', '-t', str(img_dur), '-framerate', '30'])
             parts.append(
                 '[%d:v]scale=1280:720:force_original_aspect_ratio=decrease,'
                 'pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,'
-                'settb=AVTB,setpts=PTS-STARTPTS,fps=30,'
-                'trim=duration=%s,setpts=PTS-STARTPTS[v%d];' % (i, img_dur, i))
+                'fps=30,settb=AVTB,setpts=PTS-STARTPTS[v%d];' % (i, i))
         chain = ''.join(parts)
         if transition == 'fade' and len(input_files) > 1:
             prev = '[v0]'
@@ -512,8 +588,8 @@ def _op_stitch_media(input_files, output_path, params):
             chain += ''.join('[v%d]' % i for i in range(len(input_files)))
             chain += 'concat=n=%d:v=1:a=0[outv]' % len(input_files)
         args = ['-filter_complex', chain, '-map', '[outv]', '-r', '30',
-                '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p']
-        ok, res = run_ffmpeg(args, input_files=input_files, output_file=str(out))
+                '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+        ok, res = run_ffmpeg(args, input_files=input_files, output_file=str(out), input_options=in_opts)
         return (True, out) if ok else (False, res)
 
     return _op_video_concat(input_files, out, {'quality': 'reencode'})
@@ -539,13 +615,14 @@ def _op_slideshow_with_music(input_files, output_path, params):
     out = output_path.with_suffix('.mp4')
 
     parts = []
+    in_opts = []
     for i in range(len(photos)):
+        in_opts.append(['-loop', '1', '-t', str(per_image), '-framerate', '30'])
         parts.append(
             '[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,'
             'pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,'
-            'settb=AVTB,setpts=PTS-STARTPTS,fps=30,'
-            'trim=duration=%s,setpts=PTS-STARTPTS[v%d];' % (i, width, height,
-                                                            width, height, per_image, i))
+            'fps=30,settb=AVTB,setpts=PTS-STARTPTS[v%d];' % (i, width, height,
+                                                            width, height, i))
     chain = ''.join(parts)
     if transition == 'fade' and len(photos) > 1:
         fade = max(0.1, min(_as_float(params.get('transition_duration', 0.6), 0.6),
@@ -566,6 +643,7 @@ def _op_slideshow_with_music(input_files, output_path, params):
         total_dur = _total_duration(photos, per_image)
 
     if audio:
+        in_opts.append([])
         fade_out_d = min(2.0, round(total_dur * 0.3, 3))
         fade_out_st = max(0.0, round(total_dur - fade_out_d, 3))
         if not chain.endswith(';'):
@@ -576,25 +654,39 @@ def _op_slideshow_with_music(input_files, output_path, params):
         args = ['-filter_complex', chain, '-map', last, '-map', '[aout]',
                 '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart']
-        return _run_with_audio(args, photos + [audio], out)
+        return _run_with_audio(args, photos + [audio], out, input_options=in_opts)
 
     args = ['-filter_complex', chain, '-map', last, '-c:v', 'libx264',
             '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
-    return _run_plain(args, photos, out)
+    return _run_plain(args, photos, out, input_options=in_opts)
 
 
 def _total_duration(photos, per_image):
     return max(1.0, len(photos) * per_image)
 
 
-def _run_with_audio(args, inputs, output_path):
-    ok, res = run_ffmpeg(args, input_files=inputs, output_file=str(output_path))
+def _run_with_audio(args, inputs, output_path, input_options=None):
+    ok, res = run_ffmpeg(args, input_files=inputs, output_file=str(output_path), input_options=input_options)
     return (True, output_path) if ok else (False, res)
 
 
-def _run_plain(args, inputs, output_path):
-    ok, res = run_ffmpeg(args, input_files=inputs, output_file=str(output_path))
+def _run_plain(args, inputs, output_path, input_options=None):
+    ok, res = run_ffmpeg(args, input_files=inputs, output_file=str(output_path), input_options=input_options)
     return (True, output_path) if ok else (False, res)
+
+
+def _write_concat_list(list_file: Path, paths: list):
+    """FFmpeg concat listesini guvenli kacislarla yazar (satir sonu enjeksiyonunu engeller)."""
+    lines = []
+    for p in paths:
+        s = str(p)
+        if '\n' in s or '\r' in s:
+            return False, "Gecersiz dosya yolu"
+        escaped = s.replace("'", "'\\''")
+        lines.append("file '%s'\n" % escaped)
+    with open(list_file, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+    return True, None
 
 
 def _op_video_concat(input_files, output_path, params):
@@ -608,9 +700,9 @@ def _op_video_concat(input_files, output_path, params):
     out = output_path.with_suffix('.mp4')
     reencode = str(params.get('quality', 'copy')).lower() != 'copy'
     list_file = out.with_suffix('.concat.txt')
-    with open(list_file, 'w', encoding='utf-8') as f:
-        for v in videos:
-            f.write("file '%s'\n" % v.replace("'", "\\'"))
+    ok_list, list_err = _write_concat_list(list_file, videos)
+    if not ok_list:
+        return False, list_err
     if reencode:
         args = ['-f', 'concat', '-safe', '0', '-i', str(list_file),
                 '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
@@ -668,9 +760,9 @@ def _op_merge_audio(input_files, output_path, params):
     ext = {'mp3': '.mp3', 'wav': '.wav', 'm4a': '.m4a'}.get(fmt, '.mp3')
     out = output_path.with_suffix(ext)
     list_file = out.with_suffix('.aconcat.txt')
-    with open(list_file, 'w', encoding='utf-8') as f:
-        for a in audios:
-            f.write("file '%s'\n" % a.replace("'", "\\'"))
+    ok_list, list_err = _write_concat_list(list_file, audios)
+    if not ok_list:
+        return False, list_err
     args = ['-f', 'concat', '-safe', '0', '-i', str(list_file),
             '-vn', '-acodec', codec]
     ok, res = run_ffmpeg(args, output_file=str(out))
@@ -809,6 +901,373 @@ def _op_change_speed(input_files, output_path, params):
         args = ['-vf', v_filter, '-an', '-c:v', 'libx264',
                 '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
     ok, res = run_ffmpeg(args, input_files=input_files, output_file=str(out))
+    return (True, out) if ok else (False, res)
+
+
+# ---------------------------------------------------------------- metin / altyazi / filtre
+_COLOR_NAMES = {
+    'white': (255, 255, 255, 255),
+    'black': (0, 0, 0, 255),
+    'red': (220, 38, 38, 255),
+    'yellow': (250, 204, 21, 255),
+    'green': (34, 197, 94, 255),
+    'blue': (59, 130, 246, 255),
+    'cyan': (6, 182, 212, 255),
+}
+
+
+def _parse_rgba(color_val, default=(255, 255, 255, 255)):
+    s = str(color_val or '').strip().lower()
+    if s in _COLOR_NAMES:
+        return _COLOR_NAMES[s]
+    if s.startswith('#') and len(s) in (7, 9):
+        try:
+            r = int(s[1:3], 16)
+            g = int(s[3:5], 16)
+            b = int(s[5:7], 16)
+            a = int(s[7:9], 16) if len(s) == 9 else 255
+            return (r, g, b, a)
+        except ValueError:
+            pass
+    return default
+
+
+def _load_overlay_font(size: int):
+    from PIL import ImageFont
+    for candidate in (
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
+        '/system/fonts/Roboto-Bold.ttf',
+        '/system/fonts/NotoSans-Bold.ttf',
+    ):
+        if os.path.isfile(candidate):
+            try:
+                return ImageFont.truetype(candidate, size=size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _wrap_overlay_lines(draw, text: str, font, max_width: int) -> list:
+    lines = []
+    for raw_line in str(text or '').splitlines():
+        words = raw_line.split()
+        if not words:
+            lines.append('')
+            continue
+        cur = words[0]
+        for w in words[1:]:
+            trial = cur + ' ' + w
+            bbox = draw.textbbox((0, 0), trial, font=font)
+            if (bbox[2] - bbox[0]) <= max_width:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = w
+        lines.append(cur)
+    return lines or ['']
+
+
+def _render_text_overlay_image(text: str, width: int, height: int, position: str = 'bottom',
+                               font_size: int = 0, color: str = '#FFFFFF', box: bool = True):
+    """Turkce Unicode destekli seffaf RGBA metin katmani olusturur."""
+    from PIL import Image, ImageDraw
+
+    w = max(64, int(width))
+    h = max(64, int(height))
+    fsize = int(font_size) if font_size else max(18, min(96, int(min(w, h) * 0.065)))
+    fsize = max(14, min(160, fsize))
+    font = _load_overlay_font(fsize)
+
+    layer = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    max_text_w = max(40, int(w * 0.86))
+    lines = _wrap_overlay_lines(draw, text, font, max_text_w)
+
+    line_boxes = [draw.textbbox((0, 0), ln or ' ', font=font) for ln in lines]
+    line_heights = [max(fsize, b[3] - b[1]) for b in line_boxes]
+    line_widths = [b[2] - b[0] for b in line_boxes]
+    gap = max(6, int(fsize * 0.28))
+    total_h = sum(line_heights) + gap * max(0, len(lines) - 1)
+    max_w = max(line_widths) if line_widths else 20
+
+    pad_x = max(14, int(fsize * 0.6))
+    pad_y = max(10, int(fsize * 0.4))
+    margin = max(16, int(min(w, h) * 0.05))
+    pos = str(position or 'bottom').strip().lower()
+
+    if pos in ('top', 'top-left', 'top-right'):
+        top_y = margin
+    elif pos == 'center':
+        top_y = max(margin, (h - total_h) // 2)
+    else:
+        top_y = max(margin, h - total_h - margin - pad_y)
+
+    if pos in ('top-left', 'bottom-left'):
+        box_x0 = margin
+    elif pos in ('top-right', 'bottom-right'):
+        box_x0 = max(margin, w - max_w - pad_x * 2 - margin)
+    else:
+        box_x0 = max(8, (w - max_w) // 2 - pad_x)
+
+    box_x1 = min(w - 8, box_x0 + max_w + pad_x * 2)
+    box_y0 = max(8, top_y - pad_y)
+    box_y1 = min(h - 8, top_y + total_h + pad_y)
+
+    if box:
+        draw.rounded_rectangle(
+            [box_x0, box_y0, box_x1, box_y1],
+            radius=max(8, int(fsize * 0.35)),
+            fill=(9, 11, 16, 175),
+        )
+
+    fill_rgba = _parse_rgba(color, (255, 255, 255, 255))
+    cur_y = top_y
+    for idx, ln in enumerate(lines):
+        lw = line_widths[idx]
+        if pos in ('top-left', 'bottom-left'):
+            tx = box_x0 + pad_x
+        elif pos in ('top-right', 'bottom-right'):
+            tx = max(box_x0 + pad_x, box_x1 - pad_x - lw)
+        else:
+            tx = max(8, (w - lw) // 2)
+        draw.text((tx + 2, cur_y + 2), ln, font=font, fill=(0, 0, 0, 210))
+        draw.text((tx, cur_y), ln, font=font, fill=fill_rgba)
+        cur_y += line_heights[idx] + gap
+    return layer
+
+
+def _probe_dimensions(filepath: str):
+    info = get_media_info(filepath) or {}
+    for s in info.get('streams', []):
+        if s.get('codec_type') == 'video' and s.get('width') and s.get('height'):
+            return int(s['width']), int(s['height'])
+    return 1280, 720
+
+
+def _op_add_text(input_files, output_path, params):
+    """Gorsel veya video uzerine Turkce Unicode destekli metin bindirir."""
+    if not input_files:
+        return False, "Metin eklemek icin gorsel veya video dosyasi gerekli"
+    text = str(params.get('text') or params.get('caption') or '').strip()
+    if not text:
+        return False, "Eklenecek metin (text) bos olamaz"
+    if len(text) > 500:
+        text = text[:500]
+
+    src = input_files[0]
+    src_ext = Path(src).suffix.lower()
+    position = str(params.get('position', 'bottom')).strip().lower()
+    font_size = _as_int(params.get('font_size', 0), 0)
+    color = str(params.get('color', '#FFFFFF')).strip()
+    box = bool(params.get('box', True))
+
+    if src_ext in IMAGE_EXTS:
+        try:
+            from PIL import Image
+            with Image.open(src) as base_im:
+                base = base_im.convert('RGBA')
+                overlay = _render_text_overlay_image(
+                    text, base.width, base.height,
+                    position=position, font_size=font_size, color=color, box=box,
+                )
+                combined = Image.alpha_composite(base, overlay)
+                out = output_path.with_suffix('.png')
+                combined.save(str(out), format='PNG')
+                return True, out
+        except Exception as e:
+            return False, "Gorsele metin eklenemedi: %s" % api_utils.safe_error_message(e)
+
+    w, h = _probe_dimensions(src)
+    overlay_path = Path(MEDIA_TEMP_DIR) / ('txt_%s.png' % uuid.uuid4().hex)
+    try:
+        overlay = _render_text_overlay_image(
+            text, w, h, position=position, font_size=font_size, color=color, box=box,
+        )
+        overlay.save(str(overlay_path), format='PNG')
+        start_t = params.get('start')
+        end_t = params.get('end')
+        enable_expr = ''
+        if start_t is not None and end_t is not None:
+            s_val = max(0.0, _as_float(start_t, 0.0))
+            e_val = max(s_val + 0.1, _as_float(end_t, s_val + 5.0))
+            enable_expr = ":enable='between(t,%.3f,%.3f)'" % (s_val, e_val)
+
+        out = output_path.with_suffix('.mp4')
+        fc = '[0:v][1:v]overlay=0:0%s,format=yuv420p[v]' % enable_expr
+        args = [
+            '-filter_complex', fc, '-map', '[v]', '-map', '0:a?',
+            '-c:v', 'libx264', '-preset', 'veryfast', '-c:a', 'copy', '-movflags', '+faststart',
+        ]
+        ok, res = run_ffmpeg(args, input_files=[src, str(overlay_path)], output_file=str(out))
+        return (True, out) if ok else (False, res)
+    except Exception as e:
+        return False, api_utils.safe_error_message(e)
+    finally:
+        try:
+            if overlay_path.exists():
+                overlay_path.unlink()
+        except Exception:
+            pass
+
+
+def _srt_ts_to_seconds(ts_str: str) -> float:
+    s = str(ts_str or '').strip().replace(',', '.')
+    parts = s.split(':')
+    try:
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _parse_subtitle_cues(params: dict) -> list:
+    cues = []
+    raw_list = params.get('subtitles')
+    if isinstance(raw_list, list):
+        for item in raw_list[:50]:
+            if not isinstance(item, dict):
+                continue
+            txt = str(item.get('text') or '').strip()
+            if not txt:
+                continue
+            st = max(0.0, _as_float(item.get('start', 0), 0.0))
+            en = max(st + 0.2, _as_float(item.get('end', st + 2.5), st + 2.5))
+            cues.append({'start': st, 'end': en, 'text': txt[:300]})
+        return cues
+
+    srt = str(params.get('srt') or '').strip()
+    if not srt:
+        return []
+    blocks = re.split(r'\r?\n\s*\r?\n', srt)
+    for blk in blocks[:50]:
+        lines = [ln.strip() for ln in blk.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        ts_idx = 0
+        if '-->' not in lines[0] and len(lines) > 1 and '-->' in lines[1]:
+            ts_idx = 1
+        if '-->' not in lines[ts_idx]:
+            continue
+        left, right = lines[ts_idx].split('-->', 1)
+        st = max(0.0, _srt_ts_to_seconds(left))
+        en = max(st + 0.2, _srt_ts_to_seconds(right.split()[0]))
+        txt = '\n'.join(lines[ts_idx + 1:]).strip()
+        if txt:
+            cues.append({'start': st, 'end': en, 'text': txt[:300]})
+    return cues
+
+
+def _op_burn_subtitles(input_files, output_path, params):
+    """Videoya zamanli altyazi (SRT veya JSON cue listesi) gomer."""
+    if not input_files:
+        return False, "Altyazi icin video dosyasi gerekli"
+    cues = _parse_subtitle_cues(params or {})
+    if not cues:
+        return False, "Gecerli altyazi (srt veya subtitles) bulunamadi"
+
+    src = input_files[0]
+    w, h = _probe_dimensions(src)
+    font_size = _as_int(params.get('font_size', 0), 0)
+    color = str(params.get('color', '#FFFFFF')).strip()
+
+    tmp_pngs = []
+    try:
+        in_list = [src]
+        fc_parts = []
+        prev = '[0:v]'
+        for idx, cue in enumerate(cues, start=1):
+            p = Path(MEDIA_TEMP_DIR) / ('sub_%s_%d.png' % (uuid.uuid4().hex[:8], idx))
+            im = _render_text_overlay_image(
+                cue['text'], w, h, position='bottom', font_size=font_size, color=color, box=True,
+            )
+            im.save(str(p), format='PNG')
+            tmp_pngs.append(p)
+            in_list.append(str(p))
+            out_tag = '[v%d]' % idx if idx < len(cues) else '[vout_raw]'
+            fc_parts.append(
+                "%s[%d:v]overlay=0:0:enable='between(t,%.3f,%.3f)'%s"
+                % (prev, idx, cue['start'], cue['end'], out_tag)
+            )
+            prev = out_tag
+
+        fc = ';'.join(fc_parts) + ';%sformat=yuv420p[vout]' % prev
+        out = output_path.with_suffix('.mp4')
+        args = [
+            '-filter_complex', fc, '-map', '[vout]', '-map', '0:a?',
+            '-c:v', 'libx264', '-preset', 'veryfast', '-c:a', 'copy', '-movflags', '+faststart',
+        ]
+        ok, res = run_ffmpeg(args, input_files=in_list, output_file=str(out))
+        return (True, out) if ok else (False, res)
+    except Exception as e:
+        return False, api_utils.safe_error_message(e)
+    finally:
+        for p in tmp_pngs:
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
+
+_FILTER_PRESETS = {
+    'grayscale': 'hue=s=0',
+    'bw': 'hue=s=0',
+    'sepia': 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+    'blur': 'boxblur=4:1',
+    'sharpen': 'unsharp=5:5:1.2:5:5:0.0',
+    'vignette': 'vignette=PI/4',
+    'invert': 'negate',
+    'vintage': 'curves=vintage,vignette=PI/5',
+    'bright': 'eq=brightness=0.14:contrast=1.05',
+    'dark': 'eq=brightness=-0.16:contrast=1.08',
+    'contrast': 'eq=contrast=1.35:saturation=1.12',
+    'warm': 'colortemperature=temperature=4500',
+    'cool': 'colortemperature=temperature=8500',
+    'hflip': 'hflip',
+    'vflip': 'vflip',
+    'rotate_90': 'transpose=1',
+    'rotate_180': 'transpose=1,transpose=1',
+    'rotate_270': 'transpose=2',
+}
+
+
+def _op_apply_filter(input_files, output_path, params):
+    """Gorsel veya videoya renk/efekt/yonlendirme filtresi uygular."""
+    if not input_files:
+        return False, "Filtre uygulamak icin dosya gerekli"
+    src = input_files[0]
+    src_ext = Path(src).suffix.lower()
+    name = str(params.get('filter', 'grayscale')).strip().lower()
+
+    if name == 'custom':
+        br = max(-0.5, min(_as_float(params.get('brightness', 0.0), 0.0), 0.5))
+        ct = max(0.3, min(_as_float(params.get('contrast', 1.0), 1.0), 2.5))
+        sat = max(0.0, min(_as_float(params.get('saturation', 1.0), 1.0), 3.0))
+        vf = 'eq=brightness=%.2f:contrast=%.2f:saturation=%.2f' % (br, ct, sat)
+    elif name in _FILTER_PRESETS:
+        vf = _FILTER_PRESETS[name]
+    else:
+        return False, "Desteklenmeyen filtre: %s" % name
+
+    if src_ext in IMAGE_EXTS:
+        out = output_path.with_suffix('.png')
+        args = ['-vf', vf, '-frames:v', '1']
+        ok, res = run_ffmpeg(args, input_files=[src], output_file=str(out))
+        return (True, out) if ok else (False, res)
+
+    out = output_path.with_suffix('.mp4')
+    args = [
+        '-vf', vf + ',format=yuv420p',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-c:a', 'copy', '-movflags', '+faststart',
+    ]
+    ok, res = run_ffmpeg(args, input_files=[src], output_file=str(out))
     return (True, out) if ok else (False, res)
 
 

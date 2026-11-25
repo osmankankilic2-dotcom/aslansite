@@ -25,13 +25,15 @@ class handler(BaseHTTPRequestHandler):
         try:
             subject_id = self._subject_id()
             stored = database.get_consent_db(subject_id) or privacy.get_consent(subject_id)
+            consent_val = stored.get('consent', 'unknown')
             api_utils.send_json(
                 self, 200,
                 {
-                    'consent': stored.get('consent', 'unknown'),
+                    'consent': consent_val,
                     'preferences': stored.get('preferences', {}),
                     'device_id': subject_id,
                     'timestamp': stored.get('timestamp'),
+                    'locked': (consent_val == 'accepted'),
                 },
                 methods='GET, POST, OPTIONS',
             )
@@ -62,13 +64,43 @@ class handler(BaseHTTPRequestHandler):
                                     methods='GET, POST, OPTIONS')
                 return
 
+            subject_id = self._subject_id()
+            existing = database.get_consent_db(subject_id) or privacy.get_consent(subject_id)
+            if existing.get('consent') == 'accepted':
+                if consent != 'accepted':
+                    api_utils.send_json(
+                        self, 409,
+                        {
+                            'error': 'Çerez onayı daha önce kabul edildiği için değiştirilemez veya sıfırlanamaz.',
+                            'consent': 'accepted',
+                            'locked': True,
+                        },
+                        methods='GET, POST, OPTIONS',
+                    )
+                    return
+                existing_prefs = existing.get('preferences') or {
+                    'necessary': True, 'functional': True, 'analytics': True
+                }
+                api_utils.send_json(
+                    self, 200,
+                    {
+                        'success': True,
+                        'consent': 'accepted',
+                        'preferences': existing_prefs,
+                        'device_id': subject_id,
+                        'timestamp': existing.get('timestamp'),
+                        'locked': True,
+                    },
+                    methods='GET, POST, OPTIONS',
+                )
+                return
+
             prefs = data.get('preferences') if isinstance(data.get('preferences'), dict) else {}
             clean_prefs = {
                 'necessary': True,
                 'functional': bool(prefs.get('functional', consent == 'accepted')),
                 'analytics': bool(prefs.get('analytics', False)),
             }
-            subject_id = self._subject_id()
             ip = api_utils.client_ip(self.headers)
             stored = database.store_consent_db(subject_id, consent, clean_prefs, ip=ip)
             privacy.store_consent(subject_id, consent, ip=ip)
@@ -80,6 +112,7 @@ class handler(BaseHTTPRequestHandler):
                     'preferences': clean_prefs,
                     'device_id': subject_id,
                     'timestamp': stored.get('timestamp'),
+                    'locked': (consent == 'accepted'),
                 },
                 methods='GET, POST, OPTIONS',
             )

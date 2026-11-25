@@ -128,14 +128,21 @@ def main():
 
     # ------------------------------------------------------------------
     section("1. LOGO VARLIKLARI, STATIK IZOLASYON VE CEREZ BAR YAPISI")
-    for secret_path in ("/.env.local", "/.git/config", "/server.py", "/core/config.py", "/requirements.txt"):
+    for secret_path in (
+        "/.env.local", "/.git/config", "/server.py", "/core/config.py",
+        "/requirements.txt", "/src/index.html", "/scripts/build_frontend.mjs",
+        "/assets/app.min.js.map",
+    ):
         r = client.get(secret_path)
         check(f"Blocked static {secret_path} → 404", r.status_code == 404, str(r.status_code))
 
     for pub_path in (
-        "/", "/manifest.json", "/robots.txt",
+        "/", "/manifest.json", "/robots.txt", "/sw.js",
+        "/assets/app.min.css", "/assets/app.min.js",
         "/assets/logo-mark.png", "/assets/favicon.png",
-        "/assets/icon-192.png", "/assets/logo-banner.png",
+        "/assets/icon-192.png", "/assets/icon-512.png",
+        "/assets/icon-maskable-512.png", "/assets/apple-touch-icon.png",
+        "/assets/logo-banner.png",
     ):
         r = client.get(pub_path)
         check(f"Public asset {pub_path} → 200", r.status_code == 200, str(r.status_code))
@@ -143,23 +150,44 @@ def main():
             check(f"  {pub_path} is image/png", "image/png" in (r.headers.get("Content-Type") or ""))
 
     html_txt = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
-    banner_block = html_txt.split('id="cookie-banner"')[1].split("</div>\n\n<!-- ")[0]
+    js_txt = (ROOT / "public" / "assets" / "app.min.js").read_text(encoding="utf-8")
+    css_txt = (ROOT / "public" / "assets" / "app.min.css").read_text(encoding="utf-8")
+    sw_txt = (ROOT / "public" / "sw.js").read_text(encoding="utf-8")
+
+    banner_block = html_txt.split('id="cookie-banner"')[1].split('id="cookie-modal"')[0]
     check("Cookie banner has 'Çerezleri Kabul Et'", "Çerezleri Kabul Et" in banner_block)
     check("Cookie banner has 'Çerezleri Yönet'", "Çerezleri Yönet" in banner_block)
     check("Cookie banner does NOT show reject button directly", "Çerezleri Reddet" not in banner_block)
     modal_block = html_txt.split('id="cookie-modal"')[1].split('id="auth-modal"')[0]
     check("Cookie detail modal has 'Çerezleri Reddet' at bottom", "Çerezleri Reddet" in modal_block)
+    check("Cookie reset button & function completely removed",
+          "resetCookieConsent" not in html_txt and "resetCookieConsent" not in js_txt
+          and "Çerez Tercihini Sıfırla" not in html_txt)
     check("Auth lock overlays present for TTS and AI",
           'id="tts-auth-lock"' in html_txt and 'id="ai-auth-lock"' in html_txt)
+    check("Strict CSP HTML: zero inline scripts, zero inline event handlers, zero inline styles",
+          "<script>" not in html_txt
+          and not re.search(r'\bon[a-z]+\s*=', html_txt, re.IGNORECASE)
+          and not re.search(r'\bstyle\s*=', html_txt, re.IGNORECASE))
+    check("window.name auth token storage removed", "AUTH_WIN_PREFIX" not in js_txt)
 
     # ------------------------------------------------------------------
-    section("2. HTTP GUVENLIK BASLIKLARI & KONTROLLU CORS")
+    section("2. HTTP GUVENLIK BASLIKLARI, STRICT CSP, CSRF & KONTROLLU CORS")
     r_home = client.get("/")
-    check("HTML has Content-Security-Policy", "Content-Security-Policy" in r_home.headers)
+    csp = r_home.headers.get("Content-Security-Policy", "")
+    check("HTML has Strict Content-Security-Policy (no unsafe-inline)",
+          "script-src 'self'" in csp and "style-src 'self'" in csp
+          and "'unsafe-inline'" not in csp and "worker-src 'self'" in csp
+          and "manifest-src 'self'" in csp, csp)
     check("HTML has X-Frame-Options: DENY", r_home.headers.get("X-Frame-Options") == "DENY")
     check("HTML has X-Content-Type-Options: nosniff", r_home.headers.get("X-Content-Type-Options") == "nosniff")
     check("HTML has Referrer-Policy", "Referrer-Policy" in r_home.headers)
     check("HTML has Permissions-Policy", "Permissions-Policy" in r_home.headers)
+    check("HTML has COOP, CORP, X-Permitted-Cross-Domain-Policies, X-Download-Options",
+          r_home.headers.get("Cross-Origin-Opener-Policy") == "same-origin"
+          and r_home.headers.get("Cross-Origin-Resource-Policy") == "same-origin"
+          and r_home.headers.get("X-Permitted-Cross-Domain-Policies") == "none"
+          and r_home.headers.get("X-Download-Options") == "noopen")
 
     r_api = client.get("/api/health", headers={"Origin": "https://aslansite.vercel.app"})
     check("GET /api/health → 200", r_api.status_code == 200 and r_api.get_json()["capabilities"]["auth"])
@@ -169,6 +197,15 @@ def main():
 
     r_evil_post = client.post("/api/quota", json={}, headers={"Origin": "https://evil.example"})
     check("Disallowed Origin POST → 403", r_evil_post.status_code == 403, str(r_evil_post.status_code))
+
+    r_evil_vercel = client.post("/api/quota", json={}, headers={"Origin": "https://aslansite-evil.vercel.app"})
+    check("Wildcard aslansite-* Vercel Origin POST → 403", r_evil_vercel.status_code == 403, str(r_evil_vercel.status_code))
+
+    r_cross_site = client.post("/api/quota", json={}, headers={"Sec-Fetch-Site": "cross-site"})
+    check("Sec-Fetch-Site: cross-site POST → 403", r_cross_site.status_code == 403, str(r_cross_site.status_code))
+
+    r_bad_referer = client.post("/api/quota", json={}, headers={"Referer": "https://evil.example/form.html"})
+    check("Foreign Referer POST → 403", r_bad_referer.status_code == 403, str(r_bad_referer.status_code))
 
     # ------------------------------------------------------------------
     section("3. ZORUNLU ERISIM KONTROLU, KAYIT KURALLARI VE CEREZSIZ OTURUM")
@@ -414,21 +451,654 @@ def main():
         + [str(p) for p in (ROOT / "core").glob("*.py")]
         + [str(p) for p in (ROOT / "core" / "handlers").glob("*.py")]
         + [str(p) for p in (ROOT / "api").glob("*.py")]
+        + [str(p) for p in (ROOT / "worker").glob("*.py")]
     )
     cp = subprocess.run(["python3", "-m", "py_compile", *py_files], capture_output=True, text=True)
     check("All Python files py_compile OK", cp.returncode == 0, cp.stderr[:200])
 
-    scripts = re.findall(r"<script>(.*?)</script>", html_txt, re.DOTALL)
-    js_path = WORK / "check.js"
-    js_path.write_text("\n".join(scripts), encoding="utf-8")
-    nc = subprocess.run(["node", "--check", str(js_path)], capture_output=True, text=True)
-    check("public/index.html JS syntax valid", nc.returncode == 0, nc.stderr[:200])
+    js_targets = sorted([str(p) for p in (ROOT / "src" / "js").glob("*.js")]) + [
+        str(ROOT / "public" / "assets" / "app.min.js"),
+        str(ROOT / "public" / "sw.js"),
+    ]
+    js_ok = True
+    js_err = ""
+    for jt in js_targets:
+        nc = subprocess.run(["node", "--check", jt], capture_output=True, text=True)
+        if nc.returncode != 0:
+            js_ok = False
+            js_err = f"{jt}: {nc.stderr[:180]}"
+            break
+    check("All modular src/js/*.js, app.min.js & sw.js syntax valid", js_ok, js_err)
 
-    vj = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
+    vj_raw = (ROOT / "vercel.json").read_text(encoding="utf-8")
+    vj = json.loads(vj_raw)
     check("vercel.json rewrites /api/:path* -> /api/index.py & single api/*.py",
           any(r.get("source") == "/api/:path*" and str(r.get("destination", "")).startswith("/api/index.py")
               for r in vj.get("rewrites", []))
           and len(list((ROOT / "api").glob("*.py"))) == 1)
+    check("vercel.json enforces strict CSP (no unsafe-inline) & /sw.js headers",
+          "'unsafe-inline'" not in vj_raw
+          and any(h.get("source") == "/sw.js" for h in vj.get("headers", [])))
+
+    # ------------------------------------------------------------------
+    section("9. TEK SEFERLIK CEREZ KILIDI, DONANIM/PIL, KORUMA, INPUT DOGRULAMA & PWA")
+    lock_hdrs = {"X-Device-Id": "lock-test-device-1"}
+    r_lock_acc = client.post("/api/cookie-consent", json={"consent": "accepted"}, headers=lock_hdrs)
+    check("Cookie consent accepted → 200 + locked=True",
+          r_lock_acc.status_code == 200 and r_lock_acc.get_json().get("locked") is True)
+    r_lock_rej = client.post("/api/cookie-consent", json={"consent": "rejected"}, headers=lock_hdrs)
+    check("Accepted cookie cannot be reverted to rejected → 409",
+          r_lock_rej.status_code == 409 and r_lock_rej.get_json().get("locked") is True,
+          str(r_lock_rej.status_code))
+    r_lock_cust = client.post("/api/cookie-consent", json={"consent": "custom"}, headers=lock_hdrs)
+    check("Accepted cookie cannot be reverted to custom → 409", r_lock_cust.status_code == 409)
+    r_lock_get = client.get("/api/cookie-consent", headers=lock_hdrs)
+    check("GET consent stays accepted & locked=True",
+          r_lock_get.status_code == 200 and r_lock_get.get_json().get("consent") == "accepted"
+          and r_lock_get.get_json().get("locked") is True)
+
+    # Vercel handler consent lock check
+    v_con_lock = FakeHandler(
+        api_index.handler, "POST", path="/api/index.py?__route=/api/cookie-consent",
+        body=json.dumps({"consent": "accepted"}).encode("utf-8"),
+        headers={"X-Device-Id": "vercel-lock-dev"},
+    ).run()
+    v_con_rev = FakeHandler(
+        api_index.handler, "POST", path="/api/index.py?__route=/api/cookie-consent",
+        body=json.dumps({"consent": "rejected"}).encode("utf-8"),
+        headers={"X-Device-Id": "vercel-lock-dev"},
+    ).run()
+    check("Vercel consent handler blocks revert after accept → 409",
+          v_con_lock.status == 200 and v_con_rev.status == 409)
+
+    # Input validation / DoS guards
+    check("Media process invalid params type → 400",
+          client.post("/api/media/process", json={"operation": "crop_image", "files": ["a"], "params": ["bad"]}).status_code == 400)
+    check("Media process invalid files type → 400",
+          client.post("/api/media/process", json={"operation": "crop_image", "files": "bad", "params": {}}).status_code == 400)
+    check("Media process >12 files → 400",
+          client.post("/api/media/process", json={"operation": "crop_image", "files": ["f"] * 13, "params": {}}).status_code == 400)
+    check("Media cleanup invalid max_age_hours → 400",
+          client.post("/api/media/cleanup", json={"max_age_hours": "abc"}).status_code == 400)
+
+    r_reg_inp = client.post("/api/auth/register", json={
+        "username": "InputGuardUser", "password": good_pw, "password_confirm": good_pw
+    })
+    inp_tok = r_reg_inp.get_json()["token"]
+    check("AI invalid files list → 400",
+          client.post("/api/ai", json={"message": "hi", "files": "bad"},
+                      headers={"Authorization": f"Bearer {inp_tok}"}).status_code == 400)
+
+    # PWA checks
+    r_man = client.get("/manifest.json")
+    manifest = json.loads(r_man.get_data(as_text=True))
+    sizes_purposes = [(ic.get("sizes"), ic.get("purpose", "")) for ic in manifest.get("icons", [])]
+    check("PWA manifest standalone + 192/512/maskable icons",
+          manifest.get("display") == "standalone"
+          and any(s == "192x192" for s, _ in sizes_purposes)
+          and any(s == "512x512" and "maskable" in p for s, p in sizes_purposes))
+    r_sw = client.get("/sw.js")
+    check("Service Worker served with no-store & Service-Worker-Allowed: /",
+          r_sw.status_code == 200 and "no-store" in (r_sw.headers.get("Cache-Control") or "")
+          and r_sw.headers.get("Service-Worker-Allowed") == "/" and "aslan-pwa-" in sw_txt)
+    check("No .map files in public/",
+          len(list((ROOT / "public").rglob("*.map"))) == 0)
+
+    # Pre-consent screen/GPU, silent battery, source guard & responsive CSS checks
+    check("Bundle includes pre-consent screen, WebGL GPU, Battery API & source protection",
+          "WEBGL_debug_renderer_info" in js_txt and "window.screen" in js_txt
+          and "getBattery" in js_txt and "contextmenu" in js_txt and "F12" in js_txt)
+    check("Responsive & eco CSS rules built into app.min.css",
+          "max-width:640px" in css_txt and 'data-power-mode="eco"' in css_txt)
+
+    # ------------------------------------------------------------------
+    section("10. AYRI FFMPEG SEKMESI YOK, AYLIK 2 GORSEL, FREE IMAGE FAILOVER, STT & AI PIPELINE")
+    check("Separate Medya/FFmpeg tab removed from HTML (3 tabs only)",
+          'id="panel-media"' not in html_txt and 'data-tab="media"' not in html_txt
+          and all(t in html_txt for t in ('id="panel-tts"', 'id="panel-ai"', 'id="panel-legal"')))
+
+    # Strict monthly 2 image quota (no daily limit blocking 2 on same day, 3rd blocked)
+    r_iq = client.post("/api/auth/register", json={
+        "username": "MonthlyImgUser", "password": good_pw, "password_confirm": good_pw
+    })
+    iq_tok = r_iq.get_json()["token"]
+    iq_hdrs = {"Authorization": f"Bearer {iq_tok}"}
+    fake_png_b64 = base64.b64encode(Path(imgs[0]).read_bytes()).decode("ascii")
+
+    with mock.patch.object(ai_engine, "_pollinations_image", return_value=(fake_png_b64, "image/png", "pollinations/flux")):
+        r_img1 = client.post("/api/image", json={"prompt": "aslan 1"}, headers=iq_hdrs)
+        r_img2 = client.post("/api/image", json={"prompt": "aslan 2"}, headers=iq_hdrs)
+        r_img3 = client.post("/api/image", json={"prompt": "aslan 3"}, headers=iq_hdrs)
+    check("Monthly image 1/2 succeeds (remaining=1)",
+          r_img1.status_code == 200 and r_img1.get_json()["quota"]["image"]["monthly_remaining"] == 1)
+    check("Monthly image 2/2 same day succeeds (remaining=0)",
+          r_img2.status_code == 200 and r_img2.get_json()["quota"]["image"]["monthly_remaining"] == 0)
+    check("Monthly image 3/2 blocked → 429",
+          r_img3.status_code == 429 and r_img3.get_json()["quota"]["image"]["allowed"] is False)
+
+    # Month rollover resets quota back to 2
+    u_rec = database.get_user_by_username("MonthlyImgUser")
+    u_rec["quota"]["image"]["month"]["month"] = "2020-01"
+    database.save_user_record(u_rec)
+    r_q_roll = client.get("/api/quota", headers=iq_hdrs)
+    check("New calendar month resets image quota back to 2/2",
+          r_q_roll.status_code == 200 and r_q_roll.get_json()["image"]["monthly_remaining"] == 2)
+
+    # Free image endpoint priority + Gemini last resort
+    gemini_called = []
+
+    def fake_gem_post(url, payload, timeout=90, headers=None):
+        gemini_called.append((url, headers or {}))
+        return {"predictions": [{"bytesBase64Encoded": fake_png_b64, "mimeType": "image/png"}]}
+
+    with mock.patch.object(ai_engine, "_pollinations_image", return_value=(fake_png_b64, "image/png", "pollinations/flux")), \
+         mock.patch.object(ai_engine, "_post_json", side_effect=fake_gem_post):
+        ok_pf, res_pf = ai_engine.generate_image("kedi", username_lower="monthlyimguser", api_key="AIzaDummyImgKey")
+    check("Free image provider tried FIRST (Gemini skipped when Pollinations works)",
+          ok_pf and str(res_pf.get("engine", "")).startswith("pollinations") and len(gemini_called) == 0)
+
+    with mock.patch.object(ai_engine, "_pollinations_image", return_value=(None, None, None)), \
+         mock.patch.object(ai_engine, "_try_free_image_endpoints", return_value=(None, None)), \
+         mock.patch.object(ai_engine, "_post_json", side_effect=fake_gem_post):
+        ok_gf, res_gf = ai_engine.generate_image("kopek", username_lower="monthlyimguser", api_key="AIzaDummyImgKey")
+    check("Gemini image acts as LAST RESORT when all free image providers fail",
+          ok_gf and len(gemini_called) > 0 and gemini_called[0][1].get("x-goog-api-key") == "AIzaDummyImgKey")
+
+    # New FFmpeg capabilities: add_text (img & video), image_audio_video, apply_filter, burn_subtitles
+    ok_ti, p_ti = media_engine.execute_media_operation(
+        "add_text", [imgs[0]], WORK / "ti.png", {"text": "ASLAN Şampiyon 2026", "position": "bottom"}
+    )
+    check("FFmpeg/Pillow add_text on image succeeds",
+          ok_ti and Path(p_ti).suffix == ".png" and Path(p_ti).stat().st_size > 500)
+
+    ok_tv, p_tv = media_engine.execute_media_operation(
+        "add_text", [str(vid)], WORK / "tv.mp4", {"text": "Türkçe Başlık", "position": "top"}
+    )
+    check("FFmpeg add_text on video succeeds",
+          ok_tv and Path(p_tv).suffix == ".mp4" and Path(p_tv).stat().st_size > 1000)
+
+    ok_iav, p_iav = media_engine.execute_media_operation(
+        "image_audio_video", [imgs[0], str(aud)], WORK / "iav.mp4", {}
+    )
+    info_iav = media_engine.get_media_info(str(p_iav)) if ok_iav else None
+    types_iav = [s.get("codec_type") for s in (info_iav or {}).get("streams", [])]
+    check("FFmpeg image_audio_video produces video+audio MP4",
+          ok_iav and "video" in types_iav and "audio" in types_iav, str(types_iav))
+
+    ok_flt, p_flt = media_engine.execute_media_operation(
+        "apply_filter", [imgs[0]], WORK / "flt.png", {"filter": "grayscale"}
+    )
+    check("FFmpeg apply_filter grayscale succeeds",
+          ok_flt and Path(p_flt).stat().st_size > 300)
+
+    ok_sub, p_sub = media_engine.execute_media_operation(
+        "burn_subtitles", [str(vid)], WORK / "sub.mp4",
+        {"srt": "1\n00:00:00,000 --> 00:00:01,500\nMerhaba Aslan!\n"}
+    )
+    check("FFmpeg burn_subtitles succeeds",
+          ok_sub and Path(p_sub).stat().st_size > 1000)
+
+    # Multi-step AI pipeline: generate 2 images -> combine with audio into MP4 video
+    r_pipe_u = client.post("/api/auth/register", json={
+        "username": "PipeUser2", "password": good_pw, "password_confirm": good_pw
+    })
+    pipe_tok = r_pipe_u.get_json()["token"]
+    pipe_hdrs = {"Authorization": f"Bearer {pipe_tok}"}
+    aud_b64 = base64.b64encode(Path(aud).read_bytes()).decode("ascii")
+    pipe_reply = (
+        'İki görseli üretip müzikli videoya dönüştürdüm.\n'
+        '```aslan_action\n'
+        '{"steps":['
+        '{"id":"img1","action":"generate_image","params":{"prompt":"kirmizi aslan"}},'
+        '{"id":"img2","action":"generate_image","params":{"prompt":"altin aslan"}},'
+        '{"id":"vid1","action":"slideshow_with_music","files":["$img1","$img2","$last_audio"],"params":{"per_image_duration":2,"transition":"fade"}}'
+        ']}\n```'
+    )
+    with mock.patch.object(ai_engine, "generate_reply", return_value=(pipe_reply, None)), \
+         mock.patch.object(ai_engine, "_pollinations_image", return_value=(fake_png_b64, "image/png", "pollinations/flux")):
+        r_pipe = client.post("/api/ai", json={
+            "message": "İki görsel üret, birleştirip müzikli video yap",
+            "files": [{"name": "bg.mp3", "mime_type": "audio/mpeg", "data": aud_b64}],
+        }, headers=pipe_hdrs)
+    pj = r_pipe.get_json() or {}
+    check("AI multi-step pipeline (2 images + audio -> video/mp4) → 200",
+          r_pipe.status_code == 200
+          and len(pj.get("generated_images") or []) == 2
+          and (pj.get("media_result") or {}).get("success") is True
+          and (pj.get("media_result") or {}).get("mime_type") == "video/mp4"
+          and (pj.get("quota") or {}).get("image", {}).get("monthly_remaining") == 0)
+
+    # When 0/2 image quota remains, 2-image pipeline preflight fails cleanly
+    with mock.patch.object(ai_engine, "generate_reply", return_value=(pipe_reply, None)):
+        r_pipe_over = client.post("/api/ai", json={"message": "2 görsel daha yap"}, headers=pipe_hdrs)
+    check("AI multi-step pipeline preflight rejects when monthly 2-image quota exhausted",
+          r_pipe_over.status_code == 200
+          and (r_pipe_over.get_json().get("media_result") or {}).get("quota_exceeded") is True)
+
+    # STT endpoint & frontend check
+    check("Unauthenticated /api/stt → 401", client.post("/api/stt", json={"audio_base64": "AA=="}).status_code == 401)
+    with mock.patch.object(ai_engine, "transcribe_audio", return_value=("Merhaba Aslan AI", None)):
+        r_stt = client.post("/api/stt", json={"audio_base64": aud_b64, "mime_type": "audio/mpeg"}, headers=pipe_hdrs)
+        v_stt = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/stt",
+            body=json.dumps({"audio_base64": aud_b64, "mime_type": "audio/mpeg"}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {pipe_tok}"},
+        ).run()
+    check("Flask & Vercel /api/stt return transcribed text → 200",
+          r_stt.status_code == 200 and r_stt.get_json().get("text") == "Merhaba Aslan AI"
+          and v_stt.status == 200 and v_stt.json().get("text") == "Merhaba Aslan AI")
+    check("Frontend bundle includes Web Speech API & /api/stt fallback",
+          "SpeechRecognition" in js_txt and "/api/stt" in js_txt)
+    ai_engine_src = (ROOT / "core" / "ai_engine.py").read_text(encoding="utf-8")
+    check("yt-dlp configured with cachedir=False & worker client available",
+          "'cachedir': False" in ai_engine_src and (ROOT / "core" / "worker_client.py").is_file())
+
+    # ------------------------------------------------------------------
+    section("11. ARAYUZ GIZLILIGI & SADECE ASLAN AI MARKASI")
+    built_texts = {
+        "index.html": html_txt,
+        "app.min.js": js_txt,
+        "app.min.css": css_txt,
+        "manifest.json": (ROOT / "public" / "manifest.json").read_text(encoding="utf-8"),
+        "sw.js": sw_txt,
+    }
+    forbidden_ui_tokens = (
+        "gemini", "pollinations", "ffmpeg", "ffprobe", "yt-dlp", "yt_dlp", "ytdlp",
+        "baileys", "whiskeysockets", "edge-tts", "edge_tts", "gtts", "imagen",
+        "nano-banana", "pillow", "openai", "mistral", "deepseek", "claude", "llama",
+        "groq", "huggingface", "neural tts", "pbkdf2", "sunucusuz",
+        "social-studio", "video indir", "opensocialstudio", "downloadsocial",
+    )
+    leaks = []
+    for fname, body in built_texts.items():
+        low = body.lower()
+        for tok in forbidden_ui_tokens:
+            if tok in low:
+                leaks.append(f"{fname}:{tok}")
+    check("Built UI/manifest/SW contain zero backend library, model or API names",
+          len(leaks) == 0, ", ".join(leaks))
+    check("Built HTML omits 'API' wording from visible interface",
+          not re.search(r'\bapi\b', html_txt, re.IGNORECASE))
+
+    sample_raw_errors = [
+        "gemini-2.5-flash quota exceeded",
+        "HTTPSConnectionPool host='text.pollinations.ai': https://text.pollinations.ai/openai",
+        "ffmpeg: libx264 failed with code 1",
+        "ERROR: [youtube] yt-dlp could not extract",
+        "Baileys connection closed unexpectedly",
+        "edge-tts failed: 403 NoAudioReceived",
+        "gTTS error connecting to translate",
+        "imagen-3.0-fast-generate-001 returned empty predictions",
+        "Secret leak sk-test-secret-key-1234567890 occurred",
+    ]
+    scrubber_ok = True
+    scrubber_bad = []
+    for raw_err in sample_raw_errors:
+        cleaned = api_utils.safe_error_message(raw_err)
+        clow = cleaned.lower()
+        for kw in ("gemini", "pollinations", "ffmpeg", "libx264", "yt-dlp", "baileys", "edge-tts", "gtts", "imagen", "http", "sk-test-secret"):
+            if kw in clow:
+                scrubber_ok = False
+                scrubber_bad.append(f"{kw} in {cleaned!r}")
+    check("safe_error_message scrubs backend libraries, models and URLs",
+          scrubber_ok, "; ".join(scrubber_bad))
+
+    # Endpoint response / header masking (Flask + Vercel)
+    r_brand_u = client.post("/api/auth/register", json={
+        "username": "BrandMaskUser", "password": good_pw, "password_confirm": good_pw
+    })
+    brand_hdrs = {"Authorization": f"Bearer {r_brand_u.get_json()['token']}"}
+    with mock.patch.object(ai_engine, "_pollinations_image", return_value=(fake_png_b64, "image/png", "pollinations/flux")):
+        r_f_img = client.post("/api/image", json={"prompt": "gizli marka testi"}, headers=brand_hdrs)
+        v_f_img = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/image",
+            body=json.dumps({"prompt": "gizli marka testi"}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {v_tok}"},
+        ).run()
+    r_v_img_check = (
+        r_f_img.status_code == 200 and r_f_img.get_json().get("engine") == "Aslan AI"
+        and v_f_img.status == 200 and v_f_img.json().get("engine") == "Aslan AI"
+    )
+    check("/api/image (Flask & Vercel) masks upstream engine as 'Aslan AI'",
+          r_v_img_check, f"flask={r_f_img.status_code}:{r_f_img.get_json()} vercel={v_f_img.status}:{v_f_img.json()}")
+
+    with mock.patch.object(ai_engine, "synthesize_speech", return_value=(b"ID3testaudio", "edge-tts")):
+        r_f_tts = client.post("/api/tts", json={"text": "Merhaba Aslan AI"}, headers=brand_hdrs)
+        v_f_tts = FakeHandler(
+            api_index.handler, "POST", path="/api/index.py?__route=/api/tts",
+            body=json.dumps({"text": "Merhaba Aslan AI"}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {v_tok}"},
+        ).run()
+    v_tts_hdrs = {k.lower(): v[-1] for k, v in v_f_tts.header_map().items()}
+    check("/api/tts (Flask & Vercel) sets X-Engine header to 'Aslan AI'",
+          r_f_tts.status_code == 200 and r_f_tts.headers.get("X-Engine") == "Aslan AI"
+          and v_f_tts.status == 200 and v_tts_hdrs.get("x-engine") == "Aslan AI")
+
+    pipe_imgs = pj.get("generated_images") or []
+    check("/api/ai multi-step pipeline tags images as 'Aslan AI'",
+          len(pipe_imgs) == 2 and all(item.get("engine") == "Aslan AI" for item in pipe_imgs))
+
+    sys_prompt = ai_engine.build_system_prompt()
+    check("System prompt hides FFmpeg/yt-dlp labels and enforces Aslan AI identity",
+          "FFmpeg Medya Motoru" not in sys_prompt
+          and "(yt-dlp)" not in sys_prompt
+          and "ASLAN SITE OZELLIKLERI" in sys_prompt
+          and "ASLA soyleme" in sys_prompt)
+
+    # ------------------------------------------------------------------
+    section("12. GIZLI VIDEO INDIRME & WHATSAPP BOT OLUSTURUCU (BAILEYS IPv4 + TEK HAK)")
+    import socket
+    import sqlite3
+    import time
+    import urllib.request
+
+    check("Video download UI completely hidden from HTML & JS bundle",
+          'id="social-studio"' not in html_txt
+          and "Video İndir" not in html_txt
+          and "openSocialStudio" not in js_txt
+          and "downloadSocial" not in js_txt)
+    check("Silent video download instructions & action remain active in backend AI prompt",
+          "Video indirebiliyor musun?" in sys_prompt and "social_download" in sys_prompt)
+
+    wa_dir = ROOT / "worker" / "wa_service"
+    for wa_file in ("ipv4.mjs", "bot_runtime.mjs", "server.mjs"):
+        wchk = subprocess.run(["node", "--check", str(wa_dir / wa_file)], capture_output=True, text=True)
+        check(f"WA service {wa_file} syntax valid", wchk.returncode == 0, wchk.stderr[:180])
+
+    ipv4_src = (wa_dir / "ipv4.mjs").read_text(encoding="utf-8")
+    check("WA service forces IPv4 (ipv4first & family: 4)",
+          "setDefaultResultOrder('ipv4first')" in ipv4_src and "family: 4" in ipv4_src)
+
+    baileys_imp = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         "import m, { useMultiFileAuthState, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys'; console.log('OK', typeof (m?.default || m), typeof useMultiFileAuthState, typeof fetchLatestBaileysVersion, typeof Browsers);"],
+        cwd=str(wa_dir), capture_output=True, text=True,
+    )
+    check("@whiskeysockets/baileys installed and ESM-importable",
+          baileys_imp.returncode == 0 and "OK function function function" in baileys_imp.stdout,
+          (baileys_imp.stdout + baileys_imp.stderr)[:180])
+
+    # Free ephemeral port for Node WA worker in mock mode
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        wa_port = s.getsockname()[1]
+
+    wa_token = "test-wa-worker-token-2026"
+    wa_env = os.environ.copy()
+    wa_env.update({
+        "WA_WORKER_HOST": "127.0.0.1",
+        "WA_WORKER_PORT": str(wa_port),
+        "WA_BOT_WORKER_TOKEN": wa_token,
+        "WA_MOCK_MODE": "1",
+        "WA_AUTH_DIR": str(WORK / "wa_auth"),
+    })
+    wa_proc = subprocess.Popen(
+        ["node", "server.mjs"],
+        cwd=str(wa_dir),
+        env=wa_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    old_wa_url = os.environ.get("WA_BOT_WORKER_URL")
+    old_wa_tok = os.environ.get("WA_BOT_WORKER_TOKEN")
+    os.environ["WA_BOT_WORKER_URL"] = f"http://127.0.0.1:{wa_port}"
+    os.environ["WA_BOT_WORKER_TOKEN"] = wa_token
+    try:
+        worker_up = False
+        for _ in range(80):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{wa_port}/health", timeout=1) as resp:
+                    if resp.status == 200 and json.loads(resp.read().decode("utf-8")).get("ipv4") is True:
+                        worker_up = True
+                        break
+            except Exception:
+                time.sleep(0.25)
+        check("Spawned WA Baileys IPv4 service responds /health", worker_up)
+        with urllib.request.urlopen(f"http://127.0.0.1:{wa_port}/ping", timeout=2) as p_resp:
+            p_json = json.loads(p_resp.read().decode("utf-8"))
+        check("Spawned WA Baileys IPv4 service responds /ping", p_resp.status == 200 and p_json.get("ok") is True)
+
+        # 12.1 Risk rejection stops setup cleanly
+        r_rj_u = client.post("/api/auth/register", json={
+            "username": "WaRejectUser", "password": good_pw, "password_confirm": good_pw
+        })
+        rj_hdrs = {"Authorization": f"Bearer {r_rj_u.get_json()['token']}"}
+        r_rj1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=rj_hdrs)
+        r_rj2 = client.post("/api/ai", json={"message": "Hayır, kabul etmiyorum"}, headers=rj_hdrs)
+        rj_state = database.get_user_wa_bot("warejectuser")
+        check("WA setup stops immediately if user rejects risk disclaimer",
+              r_rj1.status_code == 200 and "sorumluluk" in r_rj1.get_json().get("reply", "").lower()
+              and r_rj2.status_code == 200 and rj_state.get("stage") == "idle"
+              and not rj_state.get("setup_session", {}).get("active"))
+
+        # 12.2 Happy path: 10+ turns total cost == 1 credit + pairing card + DB encrypted key + live update
+        r_hp_u = client.post("/api/auth/register", json={
+            "username": "WaHappyUser", "password": good_pw, "password_confirm": good_pw
+        })
+        hp_hdrs = {"Authorization": f"Bearer {r_hp_u.get_json()['token']}"}
+
+        t1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=hp_hdrs)
+        check("WA Turn 1: risk warning & disclaimer, consumes 1 credit (4/5 left)",
+              t1.status_code == 200 and "sorumluluk" in t1.get_json()["reply"].lower()
+              and t1.get_json()["quota"]["ai"]["remaining"] == 4)
+
+        t2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=hp_hdrs)
+        check("WA Turn 2: asks phone number (0 extra credits, still 4/5)",
+              t2.status_code == 200 and "telefon numaras" in t2.get_json()["reply"].lower()
+              and t2.get_json()["quota"]["ai"]["remaining"] == 4)
+
+        t3 = client.post("/api/ai", json={"message": "+90 555 123 45 67"}, headers=hp_hdrs)
+        check("WA Turn 3: asks explicit phone usage permission (still 4/5)",
+              t3.status_code == 200 and "izin veriyor musunuz" in t3.get_json()["reply"].lower()
+              and t3.get_json()["quota"]["ai"]["remaining"] == 4)
+
+        t4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=hp_hdrs)
+        check("WA Turn 4: warns short expiry & asks 'Kodu almayı onaylıyor musunuz?' (still 4/5)",
+              t4.status_code == 200 and "kodu almayı onaylıyor musunuz" in t4.get_json()["reply"].lower()
+              and t4.get_json()["quota"]["ai"]["remaining"] == 4)
+
+        t5 = client.post("/api/ai", json={"message": "Evet, kodu almayı onaylıyorum"}, headers=hp_hdrs)
+        t5j = t5.get_json() or {}
+        ev5 = t5j.get("wa_event") or {}
+        check("WA Turn 5: returns 8-char pairing code & instructions (still 4/5)",
+              t5.status_code == 200 and ev5.get("type") == "pairing_code"
+              and len(ev5.get("code", "")) == 8
+              and "Bağlı Cihazlar" in t5j.get("reply", "")
+              and t5j["quota"]["ai"]["remaining"] == 4)
+
+        # Simulate WhatsApp connection open on worker
+        mc_req = urllib.request.Request(
+            f"http://127.0.0.1:{wa_port}/wa/mock-connect",
+            data=json.dumps({"user_id": "wahappyuser"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token},
+            method="POST",
+        )
+        with urllib.request.urlopen(mc_req, timeout=5) as mc_resp:
+            mc_data = json.loads(mc_resp.read().decode("utf-8"))
+        check("WA mock connection succeeded on Node Baileys worker", mc_data.get("connected") is True)
+
+        st_f = client.get("/api/wa/status", headers=hp_hdrs)
+        st_v = FakeHandler(
+            api_index.handler, "GET", path="/api/index.py?__route=/api/wa/status",
+            headers=hp_hdrs,
+        ).run()
+        check("/api/wa/status (Flask & Vercel) reports connected & 'Bağlantınız başarılı'",
+              st_f.status_code == 200 and st_f.get_json().get("connected") is True
+              and st_f.get_json().get("notification") == "Bağlantınız başarılı"
+              and st_v.status == 200 and st_v.json().get("connected") is True
+              and st_v.json().get("notification") == "Bağlantınız başarılı")
+
+        cf = client.post("/api/wa/confirm-connected", json={}, headers=hp_hdrs)
+        check("POST /api/wa/confirm-connected starts Q1 customization (0 credits)",
+              cf.status_code == 200 and "1/5" in (cf.get_json() or {}).get("reply", ""))
+
+        t6 = client.post("/api/ai", json={"message": "Tüm mesajlara cevap versin ama reklam kelimelerine sessiz kalsın"}, headers=hp_hdrs)
+        t7 = client.post("/api/ai", json={"message": "Özel mesajlarda cevap versin, gruplarda cevap vermesin"}, headers=hp_hdrs)
+        t8 = client.post("/api/ai", json={"message": "3 saniye beklesin ve yazıyor göstersin"}, headers=hp_hdrs)
+        t9 = client.post("/api/ai", json={"message": "Samimi olsun; teşekkür -> ❤️; fiyat -> Güncel liste 500 TL"}, headers=hp_hdrs)
+        user_ext_key = "AIzaUserOwnCustomKey987654321"
+        t10 = client.post("/api/ai", json={"message": f"Evet, Gemini anahtarım: {user_ext_key}"}, headers=hp_hdrs)
+        t10j = t10.get_json() or {}
+
+        with sqlite3.connect(database._db_path()) as conn:
+            raw_wa_row = conn.execute(
+                "SELECT wa_bot_json FROM users WHERE username_lower = ?", ("wahappyuser",)
+            ).fetchone()
+        raw_wa_json_str = raw_wa_row[0] if raw_wa_row else ""
+
+        w_st_req = urllib.request.Request(
+            f"http://127.0.0.1:{wa_port}/wa/status?user_id=wahappyuser",
+            headers={"X-Worker-Token": wa_token},
+            method="GET",
+        )
+        with urllib.request.urlopen(w_st_req, timeout=5) as w_st_resp:
+            w_st = json.loads(w_st_resp.read().decode("utf-8"))
+
+        check("WA customization Q1-Q5 + encrypted custom AI key completes with TOTAL 1 credit (4/5 left)",
+              all(r.status_code == 200 and r.get_json()["quota"]["ai"]["remaining"] == 4 for r in (t6, t7, t8, t9, t10))
+              and (t10j.get("wa_event") or {}).get("type") == "bot_ready"
+              and user_ext_key not in t10j.get("reply", "")
+              and user_ext_key not in raw_wa_json_str
+              and (w_st.get("config_summary") or {}).get("custom_ai", {}).get("has_key") is True
+              and (w_st.get("config_summary") or {}).get("custom_ai", {}).get("enabled") is True)
+
+        # 12.3 User starting with ONLY 1 credit remaining finishes entire flow
+        r_one_u = client.post("/api/auth/register", json={
+            "username": "WaOneCreditUser", "password": good_pw, "password_confirm": good_pw
+        })
+        one_hdrs = {"Authorization": f"Bearer {r_one_u.get_json()['token']}"}
+        database.consume_user_ai_quota("waonecredituser", amount=4)
+        o1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=one_hdrs)
+        o2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=one_hdrs)
+        o3 = client.post("/api/ai", json={"message": "05559876543"}, headers=one_hdrs)
+        o4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=one_hdrs)
+        o5 = client.post("/api/ai", json={"message": "Kodu almayı onaylıyorum"}, headers=one_hdrs)
+        mc_one = urllib.request.Request(
+            f"http://127.0.0.1:{wa_port}/wa/mock-connect",
+            data=json.dumps({"user_id": "waonecredituser"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token},
+            method="POST",
+        )
+        with urllib.request.urlopen(mc_one, timeout=5):
+            pass
+        o_cf = client.post("/api/wa/confirm-connected", json={}, headers=one_hdrs)
+        o6 = client.post("/api/ai", json={"message": "Sipariş mesajlarına cevap ver"}, headers=one_hdrs)
+        o7 = client.post("/api/ai", json={"message": "Sadece özel mesaj"}, headers=one_hdrs)
+        o8 = client.post("/api/ai", json={"message": "2 saniye yazıyor açık"}, headers=one_hdrs)
+        o9 = client.post("/api/ai", json={"message": "Kibar ve net"}, headers=one_hdrs)
+        o10 = client.post("/api/ai", json={"message": "Hayır, sadece kurallara göre çalışsın"}, headers=one_hdrs)
+        check("User with last 1/5 credit completes full rule-based WA bot setup cleanly",
+              all(r.status_code == 200 for r in (o1, o2, o3, o4, o5, o_cf, o6, o7, o8, o9, o10))
+              and o1.get_json()["quota"]["ai"]["remaining"] == 0
+              and (o10.get_json().get("wa_event") or {}).get("type") == "bot_ready")
+
+        # 12.4 Live update on active bot via chat
+        lu = client.post(
+            "/api/ai",
+            json={"message": "Artık gruplarda cevap vermesin, sadece 'sipariş' kelimesi geçince yanıt versin"},
+            headers=hp_hdrs,
+        )
+        luj = lu.get_json() or {}
+        lu_sum = (luj.get("wa_event") or {}).get("config_summary") or {}
+        with urllib.request.urlopen(w_st_req, timeout=5) as w_st_after:
+            w_after = json.loads(w_st_after.read().decode("utf-8"))
+        check("Live bot update modifies allow_groups/trigger_keywords and syncs to worker",
+              lu.status_code == 200
+              and lu_sum.get("allow_groups") is False
+              and "sipariş" in (lu_sum.get("trigger_keywords") or [])
+              and w_after.get("config_updates_count", 0) >= 2
+              and "sipariş" in ((w_after.get("config_summary") or {}).get("trigger_keywords") or []))
+
+        # 12.5 Disconnect -> 60s Keep-Alive auto-reconnect verification
+        md_req = urllib.request.Request(
+            f"http://127.0.0.1:{wa_port}/wa/mock-disconnect",
+            data=json.dumps({"user_id": "wahappyuser"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token},
+            method="POST",
+        )
+        with urllib.request.urlopen(md_req, timeout=5) as md_resp:
+            md_data = json.loads(md_resp.read().decode("utf-8"))
+        with urllib.request.urlopen(f"http://127.0.0.1:{wa_port}/ping", timeout=3) as wake_resp:
+            wake_ok = wake_resp.status == 200
+        with urllib.request.urlopen(w_st_req, timeout=5) as rec_resp:
+            rec_data = json.loads(rec_resp.read().decode("utf-8"))
+        check("60s keep-alive /ping automatically reconnects dropped WhatsApp bot session",
+              md_data.get("connected") is False
+              and wake_ok
+              and rec_data.get("connected") is True
+              and rec_data.get("reconnect_count", 0) >= 1)
+
+        # 12.6 Frontend pairing & copy card present in built bundle
+        check("Frontend bundle & CSS include WA pairing copy button & live status polling",
+              "copy-wa-code" in js_txt
+              and "confirm-wa-connected" in js_txt
+              and "/api/wa/status" in js_txt
+              and "Bağlantınız başarılı" in js_txt
+              and ".wa-pair-code" in css_txt
+              and ".wa-copy-btn" in css_txt)
+    finally:
+        if old_wa_url is None:
+            os.environ.pop("WA_BOT_WORKER_URL", None)
+        else:
+            os.environ["WA_BOT_WORKER_URL"] = old_wa_url
+        if old_wa_tok is None:
+            os.environ.pop("WA_BOT_WORKER_TOKEN", None)
+        else:
+            os.environ["WA_BOT_WORKER_TOKEN"] = old_wa_tok
+        wa_proc.terminate()
+        try:
+            wa_proc.wait(timeout=5)
+        except Exception:
+            wa_proc.kill()
+
+    # ------------------------------------------------------------------
+    section("13. 60 SANIYELIK SESSIZ KEEP-ALIVE (/api/ping, VERCEL CRON & WORKER)")
+    r_ping = client.get("/api/ping")
+    r_ping_head = client.head("/api/ping")
+    pj_ping = r_ping.get_json() or {}
+    check("Flask GET & HEAD /api/ping → 200 + lightweight payload",
+          r_ping.status_code == 200 and pj_ping.get("ok") is True
+          and set(pj_ping.keys()) == {"ok", "ts"}
+          and "no-store" in (r_ping.headers.get("Cache-Control") or "")
+          and r_ping_head.status_code == 200)
+
+    r_pq_u = client.post("/api/auth/register", json={
+        "username": "PingQuotaUser", "password": good_pw, "password_confirm": good_pw
+    })
+    pq_hdrs = {"Authorization": f"Bearer {r_pq_u.get_json()['token']}"}
+    for _ in range(5):
+        client.get("/api/ping", headers=pq_hdrs)
+    r_pq_after = client.get("/api/quota", headers=pq_hdrs).get_json() or {}
+    check("/api/ping consumes 0 AI & 0 image quota across repeated pings",
+          r_pq_after.get("ai", {}).get("remaining") == 5
+          and r_pq_after.get("image", {}).get("monthly_remaining") == 2)
+
+    v_ping_get = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/ping").run()
+    v_ping_head = FakeHandler(api_index.handler, "HEAD", path="/api/index.py?__route=/api/ping").run()
+    v_ping_hdrs = {k.lower(): v[-1] for k, v in v_ping_get.header_map().items()}
+    check("Vercel GET & HEAD /api/ping → 200 + no-store",
+          v_ping_get.status == 200 and v_ping_get.json().get("ok") is True
+          and "no-store" in v_ping_hdrs.get("cache-control", "")
+          and v_ping_head.status == 200)
+
+    check("vercel.json configures cron schedule on /api/ping",
+          any(c.get("path") == "/api/ping" and c.get("schedule") in ("* * * * *", "0 0 * * *")
+              for c in vj.get("crons", [])))
+
+    wa_srv_src = (wa_dir / "server.mjs").read_text(encoding="utf-8")
+    wa_rt_src = (wa_dir / "bot_runtime.mjs").read_text(encoding="utf-8")
+    mw_src = (ROOT / "worker" / "media_worker.py").read_text(encoding="utf-8")
+    check("Node WA & Python Media workers implement 60s silent keep-alive & /ping",
+          "KEEPALIVE_INTERVAL_MS" in wa_srv_src and "keepAliveActiveBots" in wa_rt_src
+          and "restorePersistedBots" in wa_rt_src
+          and "https://aslansite.vercel.app/api/ping" in wa_srv_src
+          and "ipv4Get" in ipv4_src and "/ping" in mw_src and "_start_keepalive_loop" in mw_src)
+
+    html_low = html_txt.lower()
+    check("Frontend has silent 60s /api/ping timer with zero console logs or UI text",
+          "/api/ping" in js_txt and "60000" in js_txt and "visibilitychange" in js_txt
+          and "console.log" not in js_txt
+          and all(t not in html_low for t in ("keep-alive", "/api/ping", "uyanık tut", "uyanik tut")))
 
     # ------------------------------------------------------------------
     section("SUMMARY")

@@ -61,7 +61,11 @@ def main():
     # ------------------------------------------------------------------
     section("1. LEGAL & COOKIE COMPLIANCE")
     html = Path(server.__file__).parent / "public" / "index.html"
+    app_js = Path(server.__file__).parent / "public" / "assets" / "app.min.js"
+    app_css = Path(server.__file__).parent / "public" / "assets" / "app.min.css"
     h = html.read_text(encoding="utf-8")
+    js_txt = app_js.read_text(encoding="utf-8")
+    css_txt = app_css.read_text(encoding="utf-8")
 
     banner_at = h.find('id="cookie-banner"')
     banner_tag_end = h.find('>', banner_at)
@@ -70,13 +74,14 @@ def main():
     check("Banner visible by default (no hidden class)",
           "hidden" not in banner_tag, banner_tag[:70])
     check("Accept button (Kabul Et) present & wired",
-          "Kabul Et" in h and "onclick=\"acceptCookies()\"" in h)
+          "Kabul Et" in h and 'data-action="accept-cookies"' in h and "acceptCookies" in js_txt)
     check("Reject button (Reddet) present & wired",
-          "Reddet" in h and "onclick=\"rejectCookies()\"" in h)
+          "Reddet" in h and 'data-action="reject-cookies"' in h and "rejectCookies" in js_txt)
     check("Preference stored in localStorage",
-          "localStorage.setItem('cookie_consent'" in h)
-    check("Preference sent to backend", "/api/cookie-consent" in h)
-    check("Reset option available", "resetCookieConsent" in h)
+          "localStorage.setItem('cookie_consent'" in js_txt)
+    check("Preference sent to backend", "/api/cookie-consent" in js_txt)
+    check("Reset option removed (one-time consent lock)",
+          "resetCookieConsent" not in h and "resetCookieConsent" not in js_txt)
     check("Terms of Service (Kullanım Koşulları) page", "legal-page-terms" in h)
     check("Privacy Policy (Gizlilik Politikası) page", "legal-page-privacy" in h)
     check("Cookie Policy (Çerez Politikası) page", "legal-page-cookies" in h)
@@ -86,17 +91,19 @@ def main():
           and h.index("legal-page-cookies") < h.index("</body>"))
     check("No lazy-load / delayed render of legal content",
           "loading=\"lazy\"" not in h and "IntersectionObserver" not in h)
-    check("Legal nav switcher present", "showLegalPage(" in h)
+    check("Legal nav switcher present", "showLegalPage(" in js_txt)
 
-    r = client.post("/api/cookie-consent", json={"consent": "accepted"})
+    r = client.post("/api/cookie-consent", json={"consent": "accepted"}, headers={"X-Device-Id": "u2-acc-dev"})
     check("POST /api/cookie-consent accept → 200", r.status_code == 200, str(r.status_code))
-    r = client.post("/api/cookie-consent", json={"consent": "rejected"})
+    r_rev = client.post("/api/cookie-consent", json={"consent": "rejected"}, headers={"X-Device-Id": "u2-acc-dev"})
+    check("POST /api/cookie-consent revert after accept → 409", r_rev.status_code == 409, str(r_rev.status_code))
+    r = client.post("/api/cookie-consent", json={"consent": "rejected"}, headers={"X-Device-Id": "u2-rej-dev"})
     check("POST /api/cookie-consent reject → 200", r.status_code == 200, str(r.status_code))
     r = client.post("/api/cookie-consent", json={"consent": "invalid"})
     check("POST invalid consent → 400", r.status_code == 400, str(r.status_code))
-    r = client.get("/api/cookie-consent")
+    r = client.get("/api/cookie-consent", headers={"X-Device-Id": "u2-acc-dev"})
     check("GET /api/cookie-consent → 200", r.status_code == 200, str(r.status_code))
-    check("GET returns stored preference", r.get_json().get("consent") in ("accepted", "rejected"),
+    check("GET returns stored preference", r.get_json().get("consent") == "accepted",
           json.dumps(r.get_json(), ensure_ascii=False))
 
     # ------------------------------------------------------------------
@@ -339,25 +346,23 @@ def main():
     check("Served HTML has cookie banner", "cookie-banner" in body)
     check("Served HTML has all 3 legal pages",
           all(x in body for x in ("legal-page-terms", "legal-page-privacy", "legal-page-cookies")))
-    check("Served HTML has 4 tabs",
-          all(x in body for x in ("panel-tts", "panel-ai", "panel-media", "panel-legal")))
+    check("Served HTML has 3 clean tabs (Medya tab removed)",
+          all(x in body for x in ("panel-tts", "panel-ai", "panel-legal"))
+          and 'id="panel-media"' not in body)
     check("Served HTML has chat input + file input",
           'id="ai-input"' in body and 'id="ai-file"' in body)
     check("Served HTML has attachment tray", 'id="attach-tray"' in body)
-    check("Served HTML has download button markup", "download-btn" in body)
-    check("Served HTML has media op selector", 'id="media-op"' in body)
-    check("Served HTML has SFX engine", "function tone(" in body and "sfx(" in body)
-    check("Served HTML has drag & drop", "addEventListener('drop'" in body)
-    check("Served HTML responsive @media", "@media (max-width: 640px)" in body)
+    check("Served bundle has download button markup", "download-btn" in js_txt)
+    check("Served HTML has AI quick commands & session media bar",
+          'id="ai-command-row"' in body and 'id="session-media-bar"' in body)
+    check("Served bundle has SFX engine", "function tone(" in js_txt and "sfx(" in js_txt)
+    check("Served bundle has drag & drop", "addEventListener('drop'" in js_txt)
+    check("Served CSS has responsive @media", "max-width:640px" in css_txt or "max-width: 640px" in css_txt)
 
     # ------------------------------------------------------------------
     section("7. STATIC ASSET / SCRIPT SYNTAX")
-    import re as _re
-    scripts = _re.findall(r"<script>(.*?)</script>", body, _re.DOTALL)
-    check("Inline script present", len(scripts) >= 1, f"{len(scripts)} script(s)")
-    tmp_js = work / "inline.js"
-    tmp_js.write_text("\n".join(scripts), encoding="utf-8")
-    res = subprocess.run(["node", "--check", str(tmp_js)], capture_output=True)
+    check("External minified app.min.js linked", "/assets/app.min.js" in body)
+    res = subprocess.run(["node", "--check", str(app_js)], capture_output=True)
     check("Frontend JS syntax valid", res.returncode == 0,
           res.stderr.decode()[:200])
 

@@ -20,7 +20,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             payload = {
                 'status': 'ok',
-                'service': 'ASLAN Technologies',
+                'service': 'Aslan AI',
                 'capabilities': {
                     'auth': True,
                     'tts': True,

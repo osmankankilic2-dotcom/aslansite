@@ -14,13 +14,15 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core import api_utils
-from core.handlers import ai, auth, consent, health, image, media, quota, social, tts
+from core.handlers import ai, auth, consent, health, image, media, ping, quota, social, stt, tts, wa
 
 _INDEX_PATHS = frozenset({'', '/api', '/api/index', '/api/index.py'})
 
 _EXACT_ROUTES = {
+    '/api/ping': ping.handler,
     '/api/health': health.handler,
     '/api/tts': tts.handler,
+    '/api/stt': stt.handler,
     '/api/ai': ai.handler,
     '/api/media/process': media.handler,
     '/api/media/social': social.handler,
@@ -56,6 +58,8 @@ def _resolve_handler(norm_path: str):
     p = (norm_path or '/').split('?', 1)[0].rstrip('/').lower()
     if p == '/api/auth' or p.startswith('/api/auth/'):
         return auth.handler
+    if p == '/api/wa' or p.startswith('/api/wa/'):
+        return wa.handler
     return _EXACT_ROUTES.get(p)
 
 
@@ -104,6 +108,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._dispatch('GET')
+
+    def do_HEAD(self):
+        self._dispatch('HEAD')
 
     def do_POST(self):
         self._dispatch('POST')

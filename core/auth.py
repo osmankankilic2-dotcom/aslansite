@@ -104,6 +104,9 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+_DUMMY_PW_HASH = hash_password("aslan-dummy-timing-guard-!9A")
+
+
 # ------------------------------------------------------------------ Cerezsiz oturum jetonu
 def _sid_hash(sid: str) -> str:
     return hashlib.sha256(("aslan-sid|" + str(sid)).encode("utf-8")).hexdigest()[:32]
@@ -236,7 +239,10 @@ def login_user(username: str, password: str):
         return False, "Kullanıcı adı ve şifre zorunludur.", 400
 
     rec = database.get_user_by_username(clean_u.casefold())
-    if not rec or not verify_password(pw, rec.get("password_hash", "")):
+    if not rec:
+        verify_password(pw, _DUMMY_PW_HASH)
+        return False, "Kullanıcı adı veya şifre hatalı.", 401
+    if not verify_password(pw, rec.get("password_hash", "")):
         return False, "Kullanıcı adı veya şifre hatalı.", 401
 
     token = issue_session_for_record(rec)

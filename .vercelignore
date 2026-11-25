@@ -13,3 +13,6 @@ __pycache__/
 .git/
 .DS_Store
 data/
+src/
+scripts/
+worker/

@@ -46,20 +46,23 @@ DB_FILE = os.path.join(DATA_DIR, "aslan_users.db")
 
 # ---------------------------------------------------------------- limitler
 AI_DAILY_LIMIT = 5            # gunluk AI mesaj hakki (hesaba bagli)
-IMAGE_DAILY_LIMIT = 3         # gunluk gorsel uretimi hakki
-IMAGE_WEEKLY_LIMIT = 5        # haftalik toplam gorsel hakki
-IMAGE_MONTHLY_LIMIT = 5       # aylik toplam gorsel hakki
+IMAGE_MONTHLY_LIMIT = 2       # aylik toplam gorsel hakki (kati takvim ayi siniri)
 
 # Ikincil IP bazli kotu ye kullanim koruma limitleri
 IP_AI_DAILY_LIMIT = 60
 IP_IMAGE_DAILY_LIMIT = 30
 IP_TTS_HOURLY_LIMIT = 60
+IP_STT_HOURLY_LIMIT = 60
 IP_SOCIAL_DAILY_LIMIT = 30
 IP_AUTH_HOURLY_LIMIT = 25
+IP_MEDIA_HOURLY_LIMIT = 40
+IP_WA_HOURLY_LIMIT = 60
 
 # ---------------------------------------------------------------- girdi & medya sinirlari
 MAX_FILE_SIZE = 50 * 1024 * 1024             # 50 MB (yerel dosya siniri)
 MAX_JSON_BODY_BYTES = 8 * 1024 * 1024        # 8 MB JSON govde siniri
+MAX_INLINE_FILES = 12                        # tek istekte en fazla inline dosya sayisi
+MAX_AI_PIPELINE_STEPS = 5                    # tek AI yanitinda en fazla otonom adim
 MAX_SLIDESHOW_PHOTOS = 10                    # en fazla 10 fotograf
 MAX_INLINE_RESULT_BYTES = 3 * 1024 * 1024    # 3 MB: inline (data URL) sonuc siniri
 MAX_HISTORY_TURNS = 10
@@ -87,14 +90,20 @@ ALLOWED_UPLOAD_EXTS = frozenset({
 POLLINATIONS_TEXT_OPENAI = "https://text.pollinations.ai/openai"
 POLLINATIONS_TEXT_POST = "https://text.pollinations.ai/"
 POLLINATIONS_TEXT_GET = "https://text.pollinations.ai"
+POLLINATIONS_TEXT_MODELS = ("openai", "mistral", "openai-large")
 
 # Mevcut Gemini API yapilandirmasi (son durak yedek + multimodal/gorsel)
 GEMINI_TEXT_MODEL = "gemini-3.5-flash-lite"
 GEMINI_LITE_MODEL = "gemini-3.5-flash-lite"
 GEMINI_IMAGE_MODEL = "imagen-3.0-fast-generate-001"
-GEMINI_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.7-flash")
+GEMINI_FALLBACK_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+)
 
-# Gorsel uretimi deneme sirasi
+# Gorsel uretimi deneme sirasi (Gemini yalnizca son durak yedegi)
 IMAGE_MODEL_CHAIN = (
     "imagen-3.0-fast-generate-001",
     "gemini-3.1-flash-lite-image",
@@ -106,8 +115,18 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TEXT_MODEL = "llama-3.3-70b-versatile"
 
-# Anahtarsiz gorsel uretimi yedegi
+# Anahtarsiz gorsel uretimi (birincil)
 POLLINATIONS_ENDPOINT = "https://image.pollinations.ai/prompt"
+POLLINATIONS_IMAGE_MODELS = ("flux", "turbo", "")
+
+# Opsiyonel harici FFmpeg / yt-dlp worker (Vercel serverless limitlerini asmak icin)
+MEDIA_WORKER_URL = os.environ.get("MEDIA_WORKER_URL", "").strip().rstrip("/")
+MEDIA_WORKER_TOKEN = os.environ.get("MEDIA_WORKER_TOKEN", "").strip()
+
+# WhatsApp bot (Baileys IPv4) worker yapilandirmasi
+WA_BOT_WORKER_URL = os.environ.get("WA_BOT_WORKER_URL", "").strip().rstrip("/")
+WA_BOT_WORKER_TOKEN = os.environ.get("WA_BOT_WORKER_TOKEN", "").strip() or MEDIA_WORKER_TOKEN
+WA_BOT_LOCAL_PORT = int(os.environ.get("WA_WORKER_PORT", "5056"))
 
 # ---------------------------------------------------------------- cerez
 COOKIE_CONSENT_KEY = "aslan_cookie_consent"

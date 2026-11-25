@@ -72,29 +72,34 @@ def main():
           shutil.which("ffprobe") or "MISSING")
 
     index_html = Path(server.__file__).parent / "public" / "index.html"
+    app_js = Path(server.__file__).parent / "public" / "assets" / "app.min.js"
     html = index_html.read_text(encoding="utf-8")
+    js_txt = app_js.read_text(encoding="utf-8")
 
     section("PHASE 1 — Legal / Cookie UI (static analysis)")
     check("Cookie banner present in HTML", 'id="cookie-banner"' in html)
-    check("Accept button (Kabul Et)", "Kabul Et" in html and "acceptCookies" in html)
-    check("Reject button (Reddet)", "Reddet" in html and "rejectCookies" in html)
+    check("Accept button (Kabul Et)", "Kabul Et" in html and "acceptCookies" in js_txt)
+    check("Reject button (Reddet)", "Reddet" in html and "rejectCookies" in js_txt)
     check("Terms of Service (Kullanım Koşulları)", "Kullanım Koşulları" in html)
     check("Privacy Policy (Gizlilik Politikası)", "Gizlilik Politikası" in html)
     check("Cookie Policy (Çerez Politikası)", "Çerez Politikası" in html)
-    check("localStorage persistence", "localStorage.setItem('cookie_consent'" in html)
-    check("No lazy/delayed legal render", "setTimeout" not in html.split("<script>")[1].split("function switchTab")[0])
+    check("localStorage persistence", "localStorage.setItem('cookie_consent'" in js_txt)
+    check("No lazy/delayed legal render", "setTimeout" not in js_txt.split("function switchTab")[0])
     check("Banner not display:none by default", "id=\"cookie-banner\"" in html and
           re_search_hidden_banner(html))
 
     section("PHASE 2 — Flask Test Client: Cookie Consent API")
     client = app.test_client()
 
-    r = client.post("/api/cookie-consent", json={"consent": "accepted"})
+    r = client.post("/api/cookie-consent", json={"consent": "accepted"}, headers={"X-Device-Id": "ts-acc-dev"})
     check("POST accept → 200", r.status_code == 200, str(r.status_code))
     check("accept response body", r.get_json().get("consent") == "accepted",
           json.dumps(r.get_json(), ensure_ascii=False))
 
-    r = client.post("/api/cookie-consent", json={"consent": "rejected"})
+    r_rev = client.post("/api/cookie-consent", json={"consent": "rejected"}, headers={"X-Device-Id": "ts-acc-dev"})
+    check("POST revert after accept → 409", r_rev.status_code == 409, str(r_rev.status_code))
+
+    r = client.post("/api/cookie-consent", json={"consent": "rejected"}, headers={"X-Device-Id": "ts-rej-dev"})
     check("POST reject → 200", r.status_code == 200, str(r.status_code))
     check("reject response body", r.get_json().get("consent") == "rejected",
           json.dumps(r.get_json(), ensure_ascii=False))

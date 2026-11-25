@@ -1,9 +1,8 @@
 """
 Cihaz bazli kullanim kotalari + HMAC-imzali HttpOnly kota cerezi + ikincil IP limiti.
 
-Bu modul, gunluk AI mesaj hakkini ve gunluk/haftalik/aylik gorsel uretimi
-haklarini tek bir kalici depoda tutar ve sunucusuz ornekler arasinda
-imzali HttpOnly cerez (`aslan_q`) ile guvenle esitler.
+Bu modul, gunluk AI mesaj hakkini ve takvim ayina bagli kati aylik (2 gorsel)
+uretim hakkini tek bir kalici depoda tutar.
 """
 import base64
 import hashlib
@@ -12,12 +11,11 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 
 from .config import (
     QUOTA_FILE,
     AI_DAILY_LIMIT,
-    IMAGE_DAILY_LIMIT,
-    IMAGE_WEEKLY_LIMIT,
     IMAGE_MONTHLY_LIMIT,
 )
 
@@ -48,6 +46,20 @@ def _safe_float(val, default: float) -> float:
         return n if n > 0 else default
     except (TypeError, ValueError):
         return default
+
+
+def _current_month_key(now: float = None) -> str:
+    dt = datetime.fromtimestamp(float(now if now is not None else time.time()), tz=timezone.utc)
+    return dt.strftime("%Y-%m")
+
+
+def _next_month_reset_ts(now: float = None) -> float:
+    dt = datetime.fromtimestamp(float(now if now is not None else time.time()), tz=timezone.utc)
+    if dt.month == 12:
+        nxt = datetime(dt.year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    else:
+        nxt = datetime(dt.year, dt.month + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    return nxt.timestamp()
 
 
 def _signing_key() -> bytes:
@@ -96,6 +108,32 @@ def _bucket(entry: dict, name: str, window: int) -> dict:
     return bucket
 
 
+def _month_bucket(img: dict, now: float = None) -> dict:
+    """Takvim ayi bazli gorsel kotasi bucket'ini dondurur."""
+    ts = float(now if now is not None else time.time())
+    cur_month = _current_month_key(ts)
+    img.pop("day", None)
+    img.pop("week", None)
+    bucket = img.get("month")
+    if not isinstance(bucket, dict):
+        bucket = {"month": cur_month, "start": ts, "count": 0}
+    elif bucket.get("month"):
+        if str(bucket.get("month")) != cur_month:
+            bucket = {"month": cur_month, "start": ts, "count": 0}
+    else:
+        start_ts = _safe_float(bucket.get("start"), ts)
+        if _current_month_key(start_ts) == cur_month:
+            bucket = {
+                "month": cur_month,
+                "start": start_ts,
+                "count": _safe_int(bucket.get("count", 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2),
+            }
+        else:
+            bucket = {"month": cur_month, "start": ts, "count": 0}
+    img["month"] = bucket
+    return bucket
+
+
 def _device(store: dict, device_id: str) -> dict:
     entry = store.get(device_id)
     if not isinstance(entry, dict):
@@ -123,28 +161,22 @@ def _ai_dict_from_bucket(bucket: dict) -> dict:
 
 def _image_dict_from_entry(img: dict) -> dict:
     now = time.time()
-    day = _bucket(img, "day", DAY)
-    week = _bucket(img, "week", WEEK)
-    month = _bucket(img, "month", MONTH)
-    daily_used = _safe_int(day.get("count", 0), 0, 0, IMAGE_DAILY_LIMIT * 2)
-    weekly_used = _safe_int(week.get("count", 0), 0, 0, IMAGE_WEEKLY_LIMIT * 2)
+    month = _month_bucket(img, now=now)
+    cur_month = month.get("month") or _current_month_key(now)
     monthly_used = _safe_int(month.get("count", 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2)
+    reset_at = _next_month_reset_ts(now)
+    remaining = max(0, IMAGE_MONTHLY_LIMIT - monthly_used)
     return {
-        "daily_limit": IMAGE_DAILY_LIMIT,
-        "weekly_limit": IMAGE_WEEKLY_LIMIT,
+        "month": cur_month,
+        "limit": IMAGE_MONTHLY_LIMIT,
+        "used": monthly_used,
+        "remaining": remaining,
         "monthly_limit": IMAGE_MONTHLY_LIMIT,
-        "daily_used": daily_used,
-        "weekly_used": weekly_used,
         "monthly_used": monthly_used,
-        "daily_remaining": max(0, IMAGE_DAILY_LIMIT - daily_used),
-        "weekly_remaining": max(0, IMAGE_WEEKLY_LIMIT - weekly_used),
-        "monthly_remaining": max(0, IMAGE_MONTHLY_LIMIT - monthly_used),
-        "allowed": (
-            daily_used < IMAGE_DAILY_LIMIT
-            and weekly_used < IMAGE_WEEKLY_LIMIT
-            and monthly_used < IMAGE_MONTHLY_LIMIT
-        ),
-        "reset_in": max(0, int(_safe_float(day.get("start"), now) + DAY - now)),
+        "monthly_remaining": remaining,
+        "allowed": monthly_used < IMAGE_MONTHLY_LIMIT,
+        "reset_at": reset_at,
+        "reset_in": max(0, int(reset_at - now)),
     }
 
 
@@ -184,9 +216,9 @@ def consume_ai(device_id: str, amount: int = 1):
         return True, _ai_dict_from_bucket(bucket)
 
 
-# ------------------------------------------------------------------ gorsel kotasi
+# ------------------------------------------------------------------ gorsel kotasi (aylik 2)
 def image_status(device_id: str) -> dict:
-    """Gorsel uretimi kotalarinin guncel durumu (degistirmez)."""
+    """Gorsel uretimi aylik kotasinin guncel durumu (degistirmez)."""
     with _LOCK:
         store = _load()
         entry = _device(store, device_id)
@@ -194,41 +226,27 @@ def image_status(device_id: str) -> dict:
 
 
 def check_image(device_id: str, amount: int = 1):
-    """Gorsel uretimi hakkini harcamadan kontrol eder. (allowed, status) dondurur."""
+    """Aylik gorsel uretimi hakkini harcamadan kontrol eder."""
     with _LOCK:
         store = _load()
         entry = _device(store, device_id)
         status = _image_dict_from_entry(entry["image"])
-        allowed = (
-            status["daily_used"] + amount <= IMAGE_DAILY_LIMIT
-            and status["weekly_used"] + amount <= IMAGE_WEEKLY_LIMIT
-            and status["monthly_used"] + amount <= IMAGE_MONTHLY_LIMIT
-        )
+        allowed = (status["monthly_used"] + int(amount)) <= IMAGE_MONTHLY_LIMIT
         return allowed, status
 
 
 def consume_image(device_id: str, amount: int = 1):
-    """Gorsel uretimi hakki harcar. (allowed, status) dondurur."""
+    """Aylik gorsel uretimi hakki harcar."""
     with _LOCK:
         store = _load()
         entry = _device(store, device_id)
         img = entry["image"]
-        day = _bucket(img, "day", DAY)
-        week = _bucket(img, "week", WEEK)
-        month = _bucket(img, "month", MONTH)
-        d_used = _safe_int(day.get("count", 0), 0, 0, IMAGE_DAILY_LIMIT * 2)
-        w_used = _safe_int(week.get("count", 0), 0, 0, IMAGE_WEEKLY_LIMIT * 2)
+        month = _month_bucket(img)
         m_used = _safe_int(month.get("count", 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2)
-        if (
-            d_used + amount > IMAGE_DAILY_LIMIT
-            or w_used + amount > IMAGE_WEEKLY_LIMIT
-            or m_used + amount > IMAGE_MONTHLY_LIMIT
-        ):
+        if m_used + int(amount) > IMAGE_MONTHLY_LIMIT:
             return False, _image_dict_from_entry(img)
-        day["count"] = d_used + amount
-        week["count"] = w_used + amount
-        month["count"] = m_used + amount
-        img["day"], img["week"], img["month"] = day, week, month
+        month["count"] = m_used + int(amount)
+        img["month"] = month
         _save(store)
         return True, _image_dict_from_entry(img)
 
@@ -247,20 +265,15 @@ def encode_quota_cookie(device_id: str, snap: dict = None, secure: bool = True) 
         entry = _device(store, device_id)
         ai_day = _bucket(entry["ai"], "day", DAY)
         img = entry["image"]
-        img_day = _bucket(img, "day", DAY)
-        img_week = _bucket(img, "week", WEEK)
-        img_month = _bucket(img, "month", MONTH)
+        img_month = _month_bucket(img, now=now)
 
         payload = {
-            "v": 1,
+            "v": 2,
             "d": str(device_id)[:16],
             "au": _safe_int(ai_day.get("count", 0), 0, 0, AI_DAILY_LIMIT * 2),
             "as": int(_safe_float(ai_day.get("start"), now)),
-            "id": _safe_int(img_day.get("count", 0), 0, 0, IMAGE_DAILY_LIMIT * 2),
-            "ids": int(_safe_float(img_day.get("start"), now)),
-            "iw": _safe_int(img_week.get("count", 0), 0, 0, IMAGE_WEEKLY_LIMIT * 2),
-            "iws": int(_safe_float(img_week.get("start"), now)),
             "im": _safe_int(img_month.get("count", 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2),
+            "imm": str(img_month.get("month") or _current_month_key(now)),
             "ims": int(_safe_float(img_month.get("start"), now)),
         }
 
@@ -294,7 +307,7 @@ def decode_quota_cookie(device_id: str, cookie_header: str):
             return None
         padded = b64 + "=" * (-len(b64) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-        if not isinstance(data, dict) or data.get("v") != 1:
+        if not isinstance(data, dict) or data.get("v") not in (1, 2):
             return None
         if data.get("d") != str(device_id)[:16]:
             return None
@@ -310,6 +323,7 @@ def sync_from_cookie(device_id: str, cookie_header: str) -> dict:
         return snapshot(device_id)
 
     now = time.time()
+    cur_month = _current_month_key(now)
     with _LOCK:
         store = _load()
         entry = _device(store, device_id)
@@ -321,40 +335,33 @@ def sync_from_cookie(device_id: str, cookie_header: str) -> dict:
             ai_bucket["count"] = ai_count
             ai_bucket["start"] = ai_start
 
-        img = entry["image"]
-        for key, window, c_key, s_key, max_lim in (
-            ("day", DAY, "id", "ids", IMAGE_DAILY_LIMIT * 2),
-            ("week", WEEK, "iw", "iws", IMAGE_WEEKLY_LIMIT * 2),
-            ("month", MONTH, "im", "ims", IMAGE_MONTHLY_LIMIT * 2),
-        ):
-            bucket = _bucket(img, key, window)
-            c_start = _safe_float(data.get(s_key), 0)
-            c_count = _safe_int(data.get(c_key), 0, 0, max_lim)
-            if c_start and (now - c_start) <= window and c_count > _safe_int(bucket.get("count", 0)):
-                bucket["count"] = c_count
-                bucket["start"] = c_start
+        month_bucket = _month_bucket(entry["image"], now=now)
+        c_month = str(data.get("imm") or "")
+        c_start = _safe_float(data.get("ims"), 0)
+        c_count = _safe_int(data.get("im"), 0, 0, IMAGE_MONTHLY_LIMIT * 2)
+        same_month = (c_month == cur_month) or (not c_month and c_start and _current_month_key(c_start) == cur_month)
+        if same_month and c_count > _safe_int(month_bucket.get("count", 0)):
+            month_bucket["count"] = c_count
+            if c_start:
+                month_bucket["start"] = c_start
 
         _save(store)
     return snapshot(device_id)
 
 
-# ------------------------------------------------------------------ istemci senkronizasyonu
 def sync_client_usage(device_id: str, client_state=None) -> dict:
-    """
-    Istemcinin kalici (localStorage) kullanim sayacini sunucu ile birlestirir.
-    En yuksek gecerli deger esas alinir; bozuk/gecmis veriler yok sayilir.
-    """
+    """Istemcinin kullanim sayacini sunucu ile birlestirir."""
     if not isinstance(client_state, dict):
         return snapshot(device_id)
 
     now = time.time()
+    cur_month = _current_month_key(now)
     with _LOCK:
         store = _load()
         entry = _device(store, device_id)
         ai_state = client_state.get("ai") if isinstance(client_state.get("ai"), dict) else {}
         img_state = client_state.get("image") if isinstance(client_state.get("image"), dict) else {}
 
-        # --- AI gunluk sayaci ---
         ai_bucket = _bucket(entry["ai"], "day", DAY)
         reset_at = ai_state.get("reset_at")
         ai_expired = False
@@ -363,7 +370,6 @@ def sync_client_usage(device_id: str, client_state=None) -> dict:
                 ai_expired = float(reset_at) < now
             except (TypeError, ValueError):
                 ai_expired = False
-
         if not ai_expired:
             server_ai = _safe_int(ai_bucket.get("count", 0), 0, 0, AI_DAILY_LIMIT * 2)
             client_ai = _safe_int(ai_state.get("used", 0), 0, 0, AI_DAILY_LIMIT * 2)
@@ -371,37 +377,27 @@ def sync_client_usage(device_id: str, client_state=None) -> dict:
                 ai_bucket["count"] = client_ai
                 ai_bucket.setdefault("start", now)
 
-        # --- Gorsel sayaclari (gun/hafta/ay) ---
-        img = entry["image"]
-        for key, window, limit, fields in (
-            ("day", DAY, IMAGE_DAILY_LIMIT, ("daily_used", "day_used", "used")),
-            ("week", WEEK, IMAGE_WEEKLY_LIMIT, ("weekly_used", "week_used", "used")),
-            ("month", MONTH, IMAGE_MONTHLY_LIMIT, ("monthly_used", "month_used", "used")),
-        ):
-            bucket = _bucket(img, key, window)
-            server_val = _safe_int(bucket.get("count", 0), 0, 0, limit * 2)
+        month_bucket = _month_bucket(entry["image"], now=now)
+        c_month = str(img_state.get("month") or "")
+        if (not c_month) or c_month == cur_month:
+            server_val = _safe_int(month_bucket.get("count", 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2)
             client_val = 0
-            for field in fields:
+            for field in ("monthly_used", "month_used", "used"):
                 client_val = max(
                     client_val,
-                    _safe_int(img_state.get(field, 0), 0, 0, limit * 2),
+                    _safe_int(img_state.get(field, 0), 0, 0, IMAGE_MONTHLY_LIMIT * 2),
                 )
             if client_val > server_val:
-                bucket["count"] = client_val
-                bucket.setdefault("start", now)
+                month_bucket["count"] = client_val
+                month_bucket.setdefault("start", now)
 
         _save(store)
-
     return snapshot(device_id)
 
 
 # ------------------------------------------------------------------ ikincil IP limiti
 def check_and_consume_ip(ip: str, bucket_name: str, limit: int, window: int):
-    """
-    IP bazli ikincil hiz sinirlamasi (X-Device-Id sahteciligine karsi ek kalkan).
-
-    Returns: (allowed, status_dict)
-    """
+    """IP bazli ikincil hiz sinirlamasi."""
     now = time.time()
     ip_hash = hashlib.sha256(str(ip or "127.0.0.1").encode("utf-8")).hexdigest()[:24]
     with _LOCK:

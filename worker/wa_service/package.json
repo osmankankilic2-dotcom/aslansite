@@ -1,0 +1,17 @@
+{
+  "name": "aslan-wa-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@hapi/boom": "^9.1.3",
+    "@whiskeysockets/baileys": "6.7.24",
+    "pino": "^9.6.0"
+  },
+  "overrides": {
+    "libsignal": "^6.0.0"
+  }
+}

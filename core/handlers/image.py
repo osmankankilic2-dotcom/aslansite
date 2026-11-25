@@ -13,8 +13,6 @@ if _ROOT not in sys.path:
 
 from core import ai_engine, api_utils, auth, config as cfg, database, quota as quota_mod
 
-IMAGE_DAILY_LIMIT = cfg.IMAGE_DAILY_LIMIT
-IMAGE_WEEKLY_LIMIT = cfg.IMAGE_WEEKLY_LIMIT
 IMAGE_MONTHLY_LIMIT = cfg.IMAGE_MONTHLY_LIMIT
 
 
@@ -93,7 +91,7 @@ class handler(BaseHTTPRequestHandler):
                     'image_base64': result['image_base64'],
                     'mime_type': result['mime_type'],
                     'prompt': result['prompt'],
-                    'engine': result.get('engine', 'gemini'),
+                    'engine': 'Aslan AI',
                     'quota': snap,
                 },
                 methods='POST, OPTIONS',

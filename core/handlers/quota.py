@@ -21,12 +21,13 @@ def _unauth_snapshot() -> dict:
         'account_bound': False,
         'ai': {'limit': cfg.AI_DAILY_LIMIT, 'used': 0, 'remaining': cfg.AI_DAILY_LIMIT},
         'image': {
-            'daily_limit': cfg.IMAGE_DAILY_LIMIT,
-            'weekly_limit': cfg.IMAGE_WEEKLY_LIMIT,
+            'limit': cfg.IMAGE_MONTHLY_LIMIT,
+            'used': 0,
+            'remaining': cfg.IMAGE_MONTHLY_LIMIT,
             'monthly_limit': cfg.IMAGE_MONTHLY_LIMIT,
-            'daily_remaining': cfg.IMAGE_DAILY_LIMIT,
-            'weekly_remaining': cfg.IMAGE_WEEKLY_LIMIT,
+            'monthly_used': 0,
             'monthly_remaining': cfg.IMAGE_MONTHLY_LIMIT,
+            'allowed': True,
         },
     }
 
