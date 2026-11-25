@@ -235,10 +235,14 @@ function appendMsg(text, type, extraNode) {
         speakBtn.className = 'msg-act-btn';
         speakBtn.textContent = '🔊 Seslendir';
         speakBtn.addEventListener('click', function () {
-            $('tts-text').value = (text || '').slice(0, 5000);
-            updateTtsCounter();
-            switchTab('tts');
-            generateAudio();
+            if (typeof speakChatMessage === 'function') {
+                speakChatMessage(text || '', speakBtn);
+            } else {
+                $('tts-text').value = (text || '').slice(0, 5000);
+                updateTtsCounter();
+                switchTab('tts');
+                generateAudio();
+            }
         });
         actBar.appendChild(copyBtn);
         actBar.appendChild(speakBtn);
@@ -254,13 +258,244 @@ function appendMsg(text, type, extraNode) {
     return div;
 }
 
+function autoResizeAiInput() {
+    var el = $('ai-input');
+    if (!el) return;
+    el.style.height = 'auto';
+    var nextH = Math.min(160, Math.max(40, el.scrollHeight || 40));
+    el.style.height = nextH + 'px';
+}
+
 function clearChat() {
     state.chatHistory = [];
+    state.activeChatId = '';
     stopWaStatusPolling();
+    if (typeof stopAllAudioPlayback === 'function') stopAllAudioPlayback();
     if ($('chat-box')) {
-        $('chat-box').innerHTML = '<div class="msg bot"><div class="md-body"><p>Sohbet temizlendi. Yeni bir konuyla devam edebilirsiniz! 🤖</p></div></div>';
+        $('chat-box').innerHTML = '<div class="msg bot"><div class="md-body"><p>Merhaba! Ben Aslan AI. Size nasıl yardımcı olabilirim?</p></div></div>';
     }
+    renderSavedChats();
     sfx('click');
+}
+
+function startNewChat() {
+    state.chatHistory = [];
+    state.activeChatId = '';
+    stopWaStatusPolling();
+    if (typeof stopAllAudioPlayback === 'function') stopAllAudioPlayback();
+    if ($('chat-box')) {
+        $('chat-box').innerHTML = '<div class="msg bot"><div class="md-body"><p>Yeni sohbet hazır. Ne üzerine çalışalım?</p></div></div>';
+    }
+    var drawer = $('chat-history-drawer');
+    if (drawer) drawer.classList.remove('open');
+    renderSavedChats();
+    if ($('ai-input')) $('ai-input').focus();
+    sfx('click');
+}
+
+function toggleChatHistoryDrawer() {
+    var drawer = $('chat-history-drawer');
+    if (!drawer) return;
+    var open = drawer.classList.toggle('open');
+    if (open) loadSavedChats();
+    sfx('click');
+}
+
+function _fmtChatDate(ts) {
+    if (!ts) return '';
+    try {
+        var d = new Date(Number(ts) * 1000);
+        return d.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short' });
+    } catch (e) {
+        return '';
+    }
+}
+
+function _daysLeftLabel(expiresAt) {
+    if (!expiresAt) return '';
+    var secs = Math.max(0, Number(expiresAt) - Math.floor(Date.now() / 1000));
+    var days = Math.max(1, Math.ceil(secs / 86400));
+    return days + ' gün kaldı';
+}
+
+function renderSavedChats() {
+    var listEl = $('chat-history-list');
+    var pinBadge = $('pinned-count-badge');
+    var cntBadge = $('history-count-badge');
+    var chats = Array.isArray(state.savedChats) ? state.savedChats : [];
+    var pinnedCount = typeof state.pinnedCount === 'number'
+        ? state.pinnedCount
+        : chats.filter(function (c) { return c && c.pinned; }).length;
+    var maxPin = state.maxPinnedChats || 2;
+
+    if (pinBadge) pinBadge.textContent = 'Sabitli: ' + pinnedCount + '/' + maxPin;
+    if (cntBadge) cntBadge.textContent = chats.length ? ('(' + chats.length + ')') : '';
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (!chats.length) {
+        var empty = document.createElement('div');
+        empty.className = 'history-empty';
+        empty.textContent = 'Henüz kaydedilmiş sohbet yok. Mesaj gönderdiğinizde sohbetleriniz 30 gün boyunca burada saklanır.';
+        listEl.appendChild(empty);
+        return;
+    }
+
+    chats.forEach(function (c) {
+        var item = document.createElement('div');
+        item.className = 'history-item' + (state.activeChatId === c.id ? ' current' : '') + (c.pinned ? ' pinned' : '');
+
+        var mainBtn = document.createElement('button');
+        mainBtn.type = 'button';
+        mainBtn.className = 'history-open-btn';
+        mainBtn.setAttribute('data-action', 'open-chat');
+        mainBtn.setAttribute('data-chat-id', c.id);
+
+        var titleSpan = document.createElement('span');
+        titleSpan.className = 'history-title';
+        titleSpan.textContent = c.title || 'Sohbet';
+
+        var metaSpan = document.createElement('span');
+        metaSpan.className = 'history-meta';
+        metaSpan.textContent = c.pinned
+            ? ('📌 Silinmez / Sabitli · ' + _fmtChatDate(c.updated_at))
+            : (_fmtChatDate(c.updated_at) + ' · ' + _daysLeftLabel(c.expires_at));
+
+        mainBtn.appendChild(titleSpan);
+        mainBtn.appendChild(metaSpan);
+
+        var actWrap = document.createElement('div');
+        actWrap.className = 'history-item-actions';
+
+        var pinBtn = document.createElement('button');
+        pinBtn.type = 'button';
+        pinBtn.className = 'history-act-btn' + (c.pinned ? ' is-pinned' : '');
+        pinBtn.setAttribute('data-action', 'toggle-pin-chat');
+        pinBtn.setAttribute('data-chat-id', c.id);
+        pinBtn.setAttribute('data-pinned', c.pinned ? '1' : '0');
+        pinBtn.title = c.pinned ? 'Kilidi kaldır (30 gün kuralına döner)' : 'Silinmesin / Sabitle (en fazla 2 sohbet)';
+        pinBtn.textContent = c.pinned ? '🔓 Kilidi Aç' : '📌 Sabitle';
+
+        var delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'history-act-btn danger';
+        delBtn.setAttribute('data-action', 'delete-chat');
+        delBtn.setAttribute('data-chat-id', c.id);
+        delBtn.title = 'Sohbeti sil';
+        delBtn.textContent = '🗑️';
+
+        actWrap.appendChild(pinBtn);
+        actWrap.appendChild(delBtn);
+
+        item.appendChild(mainBtn);
+        item.appendChild(actWrap);
+        listEl.appendChild(item);
+    });
+}
+
+async function loadSavedChats() {
+    if (!state.authToken) {
+        state.savedChats = [];
+        state.pinnedCount = 0;
+        renderSavedChats();
+        return;
+    }
+    try {
+        var res = await apiFetch('/api/chats', { method: 'GET' });
+        if (!res.ok) return;
+        var data = await res.json();
+        state.savedChats = Array.isArray(data.chats) ? data.chats : [];
+        state.pinnedCount = typeof data.pinned_count === 'number' ? data.pinned_count : 0;
+        state.maxPinnedChats = typeof data.max_pinned === 'number' ? data.max_pinned : 2;
+        renderSavedChats();
+    } catch (e) {}
+}
+
+async function openSavedChat(chatId) {
+    if (!chatId || !state.authToken) return;
+    try {
+        var res = await apiFetch('/api/chats/' + encodeURIComponent(chatId), { method: 'GET' });
+        var data = await parseApiResponse(res);
+        if (!res.ok || !data.chat) {
+            throw new Error(data.error || 'Sohbet yüklenemedi.');
+        }
+        var ch = data.chat;
+        state.activeChatId = ch.id || chatId;
+        state.chatHistory = [];
+        stopWaStatusPolling();
+        var box = $('chat-box');
+        if (box) box.innerHTML = '';
+        (ch.messages || []).forEach(function (m) {
+            if (!m || !m.text) return;
+            var role = m.role === 'model' ? 'bot' : 'user';
+            appendMsg(m.text, role);
+            state.chatHistory.push({ role: m.role === 'model' ? 'model' : 'user', text: m.text });
+        });
+        if (!(ch.messages || []).length && box) {
+            appendMsg('Kaldığınız yerden devam edebilirsiniz.', 'bot');
+        }
+        if (state.chatHistory.length > 20) state.chatHistory = state.chatHistory.slice(-20);
+        var drawer = $('chat-history-drawer');
+        if (drawer) drawer.classList.remove('open');
+        renderSavedChats();
+        sfx('click');
+        showToast('Sohbet yüklendi, kaldığınız yerden devam edebilirsiniz.', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+        sfx('error');
+    }
+}
+
+async function togglePinChat(chatId, wantPin) {
+    if (!chatId || !state.authToken) return;
+    try {
+        var res = await apiFetch('/api/chats/pin', {
+            method: 'POST',
+            body: JSON.stringify({ chat_id: chatId, pinned: !!wantPin })
+        });
+        var data = await parseApiResponse(res);
+        if (res.status === 409) {
+            showToast(data.error || 'En fazla 2 sohbet sabitlenebilir. Önce diğerlerinden birinin kilidini kaldırın.', 'warn');
+            sfx('error');
+            return;
+        }
+        if (!res.ok) {
+            throw new Error(data.error || 'Sabitleme güncellenemedi.');
+        }
+        state.savedChats = Array.isArray(data.chats) ? data.chats : state.savedChats;
+        state.pinnedCount = typeof data.pinned_count === 'number' ? data.pinned_count : state.pinnedCount;
+        renderSavedChats();
+        sfx('success');
+        showToast(wantPin ? 'Sohbet silinmemek üzere sabitlendi.' : 'Sohbet kilidi kaldırıldı (30 gün saklanır).', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+        sfx('error');
+    }
+}
+
+async function deleteSavedChat(chatId) {
+    if (!chatId || !state.authToken) return;
+    try {
+        var res = await apiFetch('/api/chats/delete', {
+            method: 'POST',
+            body: JSON.stringify({ chat_id: chatId })
+        });
+        var data = await parseApiResponse(res);
+        if (!res.ok) {
+            throw new Error(data.error || 'Sohbet silinemedi.');
+        }
+        if (state.activeChatId === chatId) {
+            startNewChat();
+        }
+        state.savedChats = Array.isArray(data.chats) ? data.chats : [];
+        state.pinnedCount = typeof data.pinned_count === 'number' ? data.pinned_count : 0;
+        renderSavedChats();
+        sfx('click');
+        showToast('Sohbet silindi.', 'info');
+    } catch (e) {
+        showToast(e.message, 'error');
+        sfx('error');
+    }
 }
 
 function updateQuota(remaining) {
@@ -618,11 +853,13 @@ async function sendAI() {
     }
     appendMsg(text || '(dosya gönderildi)', 'user', chipsNode);
     input.value = '';
+    autoResizeAiInput();
     state.attachments = [];
     renderAttachTray();
 
+    var origBtnHtml = btn ? btn.innerHTML : '';
     btn.disabled = true;
-    btn.innerText = 'Düşünüyor...';
+    btn.classList.add('is-sending');
     sfx('send');
 
     var loadingId = 'ld-' + Date.now();
@@ -645,6 +882,7 @@ async function sendAI() {
             method: 'POST',
             body: JSON.stringify({
                 message: text,
+                chat_id: state.activeChatId || '',
                 files: inlineFiles,
                 context_files: contextFiles,
                 history: state.chatHistory.slice(-10)
@@ -668,6 +906,10 @@ async function sendAI() {
             if (text) state.chatHistory.push({ role: 'user', text: text });
             if (data.reply) state.chatHistory.push({ role: 'model', text: data.reply });
             if (state.chatHistory.length > 20) state.chatHistory = state.chatHistory.slice(-20);
+            if (data.chat_id) {
+                state.activeChatId = data.chat_id;
+            }
+            loadSavedChats();
 
             if (data.quota) {
                 applyQuotaSnapshot(data.quota);
@@ -697,13 +939,20 @@ async function sendAI() {
         sfx('error');
     } finally {
         btn.disabled = false;
-        btn.innerText = 'Gönder';
+        btn.classList.remove('is-sending');
+        if (origBtnHtml) btn.innerHTML = origBtnHtml;
     }
 }
 
-/* ---------------- SESLI MESAJDAN METNE ---------------- */
+/* ---------------- SUREKLI DINLEYEN MIKROFON (PUSH-TO-TOGGLE) ---------------- */
 var speechRec = null;
 var isListeningSpeech = false;
+var micWantListening = false;
+var micBaseText = '';
+var micAccumulatedFinal = '';
+var micSessionFinal = '';
+var micSessionInterim = '';
+var micRestartTimer = null;
 var mediaRecorder = null;
 var recordedChunks = [];
 
@@ -712,9 +961,25 @@ function _setMicState(active) {
     if (!btn) return;
     btn.classList.toggle('recording', !!active);
     btn.classList.toggle('listening', !!active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    btn.title = active
+        ? 'Dinleniyor... Bitirip kutuya aktarmak için tekrar dokunun'
+        : 'Sesli dikte (başlat / durdur)';
 }
 
-async function _transcribeBlobAndSend(blob) {
+function _flushMicTextToInput() {
+    var input = $('ai-input');
+    if (!input) return;
+    var combined = [micBaseText, micAccumulatedFinal, micSessionFinal, micSessionInterim]
+        .filter(function (s) { return s && String(s).trim(); })
+        .map(function (s) { return String(s).trim(); })
+        .join(' ')
+        .trim();
+    input.value = combined;
+    autoResizeAiInput();
+}
+
+async function _transcribeBlobToInput(blob) {
     var input = $('ai-input');
     var btn = $('btn-mic');
     if (!blob || blob.size < 100) {
@@ -750,11 +1015,13 @@ async function _transcribeBlobAndSend(blob) {
             throw new Error(data.error || 'Ses metne dönüştürülemedi.');
         }
         if (input) {
-            input.value = String(data.text).trim();
+            var existing = input.value.trim();
+            var spoken = String(data.text).trim();
+            input.value = existing ? (existing + ' ' + spoken) : spoken;
+            autoResizeAiInput();
+            input.focus();
         }
-        if (input && input.value.trim()) {
-            sendAI();
-        }
+        showToast('Konuşmanız mesaj kutusuna aktarıldı.', 'success');
     } catch (e) {
         showToast(e.message, 'error');
         sfx('error');
@@ -765,7 +1032,7 @@ async function _transcribeBlobAndSend(blob) {
 
 async function _startFallbackRecorder() {
     if (!navigator.mediaDevices || !window.MediaRecorder) {
-        showToast('Tarayıcınız sesli mesaj dönüşümünü desteklemiyor.', 'warn');
+        showToast('Tarayıcınız sesli dikteyi desteklemiyor.', 'warn');
         return;
     }
     try {
@@ -777,16 +1044,101 @@ async function _startFallbackRecorder() {
             stream.getTracks().forEach(function (t) { t.stop(); });
             _setMicState(false);
             var blob = new Blob(recordedChunks, { type: 'audio/webm' });
-            _transcribeBlobAndSend(blob);
+            _transcribeBlobToInput(blob);
         };
         mediaRecorder.start();
         _setMicState(true);
         sfx('click');
-        showToast('Dinleniyor... Bitirmek için mikrofona tekrar dokunun.', 'info');
+        showToast('Mikrofon açık: Konuşun, bitirdiğinizde tekrar dokunun.', 'info');
     } catch (e) {
         _setMicState(false);
         showToast('Mikrofon erişimi reddedildi: ' + e.message, 'error');
         sfx('error');
+    }
+}
+
+function _startContinuousRecognition(SR) {
+    if (!micWantListening) return;
+    micSessionFinal = '';
+    micSessionInterim = '';
+    try {
+        speechRec = new SR();
+        speechRec.lang = 'tr-TR';
+        speechRec.interimResults = true;
+        speechRec.continuous = true;
+
+        speechRec.onstart = function () {
+            isListeningSpeech = true;
+            _setMicState(true);
+        };
+
+        speechRec.onresult = function (ev) {
+            var finals = [];
+            var interims = [];
+            for (var i = 0; i < ev.results.length; i++) {
+                var tr = ev.results[i][0] ? ev.results[i][0].transcript : '';
+                if (!tr) continue;
+                if (ev.results[i].isFinal) {
+                    finals.push(tr.trim());
+                } else {
+                    interims.push(tr.trim());
+                }
+            }
+            micSessionFinal = finals.filter(Boolean).join(' ').trim();
+            micSessionInterim = interims.filter(Boolean).join(' ').trim();
+            _flushMicTextToInput();
+        };
+
+        speechRec.onerror = function (ev) {
+            var errCode = ev && ev.error ? String(ev.error) : '';
+            if (errCode === 'no-speech' || errCode === 'aborted') {
+                return;
+            }
+            if (errCode === 'not-allowed' || errCode === 'permission-denied') {
+                micWantListening = false;
+                isListeningSpeech = false;
+                _setMicState(false);
+                showToast('Mikrofon izni verilmedi.', 'error');
+                sfx('error');
+                return;
+            }
+            if (errCode === 'service-not-allowed' || errCode === 'network' || errCode === 'language-not-supported') {
+                micWantListening = false;
+                isListeningSpeech = false;
+                _setMicState(false);
+                _startFallbackRecorder();
+                return;
+            }
+            if (errCode) {
+                showToast('Ses algılama hatası: ' + errCode, 'warn');
+            }
+        };
+
+        speechRec.onend = function () {
+            isListeningSpeech = false;
+            var chunk = (micSessionFinal || micSessionInterim || '').trim();
+            if (chunk) {
+                micAccumulatedFinal = [micAccumulatedFinal, chunk].filter(Boolean).join(' ').trim();
+            }
+            micSessionFinal = '';
+            micSessionInterim = '';
+            _flushMicTextToInput();
+            if (micWantListening) {
+                if (micRestartTimer) clearTimeout(micRestartTimer);
+                micRestartTimer = setTimeout(function () {
+                    if (micWantListening) _startContinuousRecognition(SR);
+                }, 120);
+            } else {
+                _setMicState(false);
+            }
+        };
+
+        speechRec.start();
+    } catch (e) {
+        micWantListening = false;
+        isListeningSpeech = false;
+        _setMicState(false);
+        _startFallbackRecorder();
     }
 }
 
@@ -796,8 +1148,28 @@ function toggleRecord() {
         _setMicState(false);
         return;
     }
-    if (isListeningSpeech && speechRec) {
-        try { speechRec.stop(); } catch (e) {}
+
+    if (micWantListening || isListeningSpeech) {
+        micWantListening = false;
+        if (micRestartTimer) {
+            clearTimeout(micRestartTimer);
+            micRestartTimer = null;
+        }
+        var activeTail = (micSessionFinal || micSessionInterim || '').trim();
+        if (activeTail) {
+            micAccumulatedFinal = [micAccumulatedFinal, activeTail].filter(Boolean).join(' ').trim();
+        }
+        micSessionFinal = '';
+        micSessionInterim = '';
+        _flushMicTextToInput();
+        if (speechRec) {
+            try { speechRec.stop(); } catch (e) {}
+        }
+        isListeningSpeech = false;
+        _setMicState(false);
+        sfx('success');
+        if ($('ai-input')) $('ai-input').focus();
+        showToast('Konuşmanız mesaj kutusuna aktarıldı.', 'success');
         return;
     }
 
@@ -808,74 +1180,15 @@ function toggleRecord() {
     }
 
     var input = $('ai-input');
-    var baseText = input ? input.value.trim() : '';
-    var finalTranscript = '';
-
-    try {
-        speechRec = new SR();
-        speechRec.lang = 'tr-TR';
-        speechRec.interimResults = true;
-        speechRec.continuous = false;
-
-        speechRec.onstart = function () {
-            isListeningSpeech = true;
-            _setMicState(true);
-            sfx('click');
-        };
-
-        speechRec.onresult = function (ev) {
-            var interim = '';
-            var finalChunk = '';
-            for (var i = ev.resultIndex; i < ev.results.length; i++) {
-                var tr = ev.results[i][0] ? ev.results[i][0].transcript : '';
-                if (ev.results[i].isFinal) {
-                    finalChunk += tr;
-                } else {
-                    interim += tr;
-                }
-            }
-            if (finalChunk) {
-                finalTranscript = (finalTranscript ? (finalTranscript + ' ') : '') + finalChunk.trim();
-            }
-            var combined = [baseText, finalTranscript, interim.trim()].filter(Boolean).join(' ').trim();
-            if (input) input.value = combined;
-        };
-
-        speechRec.onerror = function (ev) {
-            var errCode = ev && ev.error ? String(ev.error) : '';
-            isListeningSpeech = false;
-            _setMicState(false);
-            if (errCode === 'not-allowed' || errCode === 'permission-denied') {
-                showToast('Mikrofon izni verilmedi.', 'error');
-                sfx('error');
-                return;
-            }
-            if (errCode === 'service-not-allowed' || errCode === 'network' || errCode === 'language-not-supported') {
-                _startFallbackRecorder();
-                return;
-            }
-            if (errCode && errCode !== 'aborted' && errCode !== 'no-speech') {
-                showToast('Ses algılama hatası: ' + errCode, 'warn');
-            }
-        };
-
-        speechRec.onend = function () {
-            var wasListening = isListeningSpeech;
-            isListeningSpeech = false;
-            _setMicState(false);
-            if (!wasListening) return;
-            var currentText = input ? input.value.trim() : '';
-            if (currentText && (finalTranscript || currentText !== baseText)) {
-                sendAI();
-            }
-        };
-
-        speechRec.start();
-    } catch (e) {
-        isListeningSpeech = false;
-        _setMicState(false);
-        _startFallbackRecorder();
-    }
+    micBaseText = input ? input.value.trim() : '';
+    micAccumulatedFinal = '';
+    micSessionFinal = '';
+    micSessionInterim = '';
+    micWantListening = true;
+    _setMicState(true);
+    sfx('click');
+    showToast('Mikrofon açık: Konuşun, bitirdiğinizde tekrar dokunun.', 'info');
+    _startContinuousRecognition(SR);
 }
 
 function initChatDragDrop() {

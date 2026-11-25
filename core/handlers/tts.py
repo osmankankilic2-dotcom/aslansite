@@ -96,7 +96,10 @@ class handler(BaseHTTPRequestHandler):
             if not audio:
                 api_utils.send_json(
                     self, 503,
-                    {'error': 'Ses uretilemedi. Lutfen daha sonra tekrar deneyin.'},
+                    {
+                        'error': 'Ses uretilemedi. Lutfen daha sonra tekrar deneyin.',
+                        'fallback_speech': True,
+                    },
                     methods='POST, OPTIONS',
                 )
                 return

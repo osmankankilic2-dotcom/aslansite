@@ -351,7 +351,37 @@ def main():
           r_txt == "Ucretsiz AI yaniti!" and any("pollinations.ai" in u for u in called_urls)
           and not any("generativelanguage.googleapis.com" in u for u in called_urls), str(called_urls))
 
-    # 6.2 Tum ucretsiz uclar hata verirse en son Gemini devreye girmeli (x-goog-api-key basligi ile)
+    # 6.2 Free chain order: Pollinations fails -> DDG AI Chat (with x-vqd-4) succeeds before DeepInfra/HF/Gemini
+    def fake_ddg_raw(url, payload, timeout=20, headers=None):
+        if "duckduckgo.com/duckchat" in url:
+            return 'data: {"message":"DDG "}\ndata: {"message":"anonim yaniti!"}\ndata: [DONE]\n'
+        raise RuntimeError("Pollinations raw fail")
+
+    with mock.patch.object(ai_engine, "_post_json", side_effect=RuntimeError("Pollinations post fail")), \
+         mock.patch.object(ai_engine, "_get_raw_text", side_effect=RuntimeError("Pollinations get fail")), \
+         mock.patch.object(ai_engine, "_ddg_fetch_vqd4", return_value="test-vqd-4-token"), \
+         mock.patch.object(ai_engine, "_post_raw_text", side_effect=fake_ddg_raw):
+        r_ddg, _ = ai_engine.generate_reply("Merhaba DDG", api_key="AIzaShouldNotBeCalledWhenDdgWorks")
+    check("DuckDuckGo AI Chat failover succeeds when Pollinations fails", r_ddg == "DDG anonim yaniti!", repr(r_ddg))
+
+    # 6.2b DeepInfra/HF open endpoint failover when Pollinations & DDG unavailable
+    di_calls = []
+
+    def fake_di_only(url, payload, timeout=90, headers=None):
+        di_calls.append(url)
+        if "api.deepinfra.com" in url:
+            return {"choices": [{"message": {"content": "DeepInfra ucretsiz yaniti!"}}]}
+        raise RuntimeError("Upstream fail")
+
+    with mock.patch.object(ai_engine, "_post_json", side_effect=fake_di_only), \
+         mock.patch.object(ai_engine, "_get_raw_text", side_effect=RuntimeError("Get fail")), \
+         mock.patch.object(ai_engine, "_ddg_fetch_vqd4", return_value=""):
+        r_di, _ = ai_engine.generate_reply("Merhaba DeepInfra", api_key="AIzaShouldNotBeCalledWhenDeepInfraWorks")
+    check("DeepInfra open failover succeeds before Gemini fallback",
+          r_di == "DeepInfra ucretsiz yaniti!" and any("api.deepinfra.com" in u for u in di_calls)
+          and not any("generativelanguage.googleapis.com" in u for u in di_calls))
+
+    # 6.3 Tum ucretsiz uclar hata verirse en son Gemini (gemini-4-hydrogen) devreye girmeli
     fallback_calls = []
 
     def fake_all_free_fail(url, payload, timeout=90, headers=None):
@@ -362,13 +392,35 @@ def main():
 
     with mock.patch.object(ai_engine, "_post_json", side_effect=fake_all_free_fail), \
          mock.patch.object(ai_engine, "_post_raw_text", side_effect=RuntimeError("Free raw fail")), \
-         mock.patch.object(ai_engine, "_get_raw_text", side_effect=RuntimeError("Free get fail")):
+         mock.patch.object(ai_engine, "_get_raw_text", side_effect=RuntimeError("Free get fail")), \
+         mock.patch.object(ai_engine, "_ddg_fetch_vqd4", return_value=""):
         r_gem, e_gem = ai_engine.generate_reply("Merhaba", api_key="AIzaTestFallbackKey999")
-    gem_headers = [h for u, h in fallback_calls if "generativelanguage.googleapis.com" in u]
-    check("Gemini acts as LAST RESORT when all free endpoints fail",
-          r_gem == "Gemini son durak yaniti!" and gem_headers and gem_headers[0].get("x-goog-api-key") == "AIzaTestFallbackKey999")
+    gem_entries = [(u, h) for u, h in fallback_calls if "generativelanguage.googleapis.com" in u]
+    check("Gemini (gemini-4-hydrogen) acts as LAST RESORT when all free endpoints fail",
+          r_gem == "Gemini son durak yaniti!"
+          and gem_entries
+          and "gemini-4-hydrogen" in gem_entries[0][0]
+          and gem_entries[0][1].get("x-goog-api-key") == "AIzaTestFallbackKey999")
 
-    # 6.3 TTS kontrol eylemi (tts_control)
+    # 6.4 TTS HTTPS fallback (edge-tts fails -> chunked HTTPS MP3 works) + 503 fallback_speech
+    with mock.patch.object(ai_engine, "_try_edge_tts", return_value=(None, None)), \
+         mock.patch.object(ai_engine, "_fetch_tts_chunk_https", return_value=b"\xff\xf3\x84\xc4" + b"\x00" * 200):
+        tts_bytes, tts_eng = ai_engine.synthesize_speech("Merhaba Aslan AI. Seslendirme testi.", "tr-TR-AhmetNeural")
+    check("TTS falls back to HTTPS chunked synthesis when edge-tts fails",
+          tts_eng == "https-tts" and tts_bytes and len(tts_bytes) > 200)
+
+    r_tts_u = client.post("/api/auth/register", json={
+        "username": "TtsFallbackUser", "password": good_pw, "password_confirm": good_pw
+    })
+    tts_hdrs = {"Authorization": f"Bearer {r_tts_u.get_json()['token']}"}
+    with mock.patch.object(ai_engine, "synthesize_speech", return_value=(None, None)):
+        r_tts_503 = client.post("/api/tts", json={"text": "Test sesi"}, headers=tts_hdrs)
+    check("/api/tts 503 sets fallback_speech=True & frontend includes speechSynthesis",
+          r_tts_503.status_code == 503
+          and (r_tts_503.get_json() or {}).get("fallback_speech") is True
+          and "speechSynthesis" in js_txt)
+
+    # 6.5 TTS kontrol eylemi (tts_control)
     ctrl = ai_engine.run_action({
         "action": "tts_control",
         "params": {"command": "stop", "voice": "tr-TR-EmelNeural", "rate": "+20%", "pitch": "-4Hz"},
@@ -871,53 +923,66 @@ def main():
             p_json = json.loads(p_resp.read().decode("utf-8"))
         check("Spawned WA Baileys IPv4 service responds /ping", p_resp.status == 200 and p_json.get("ok") is True)
 
-        # 12.1 Risk rejection stops setup cleanly
+        # 12.1 Static WA templates removed; AI controls WA setup naturally (0 AI credits during setup!)
+        wa_bot_src_pre = (ROOT / "core" / "wa_bot.py").read_text(encoding="utf-8")
+        check("Static WA canned wizard templates ('1/5', handle_chat_turn) completely removed",
+              "def handle_chat_turn" not in wa_bot_src_pre
+              and "**1/5" not in wa_bot_src_pre
+              and "build_ai_context" in wa_bot_src_pre)
+
         r_rj_u = client.post("/api/auth/register", json={
             "username": "WaRejectUser", "password": good_pw, "password_confirm": good_pw
         })
         rj_hdrs = {"Authorization": f"Bearer {r_rj_u.get_json()['token']}"}
-        r_rj1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=rj_hdrs)
-        r_rj2 = client.post("/api/ai", json={"message": "Hayır, kabul etmiyorum"}, headers=rj_hdrs)
+        ai_ctx_seen = []
+
+        def fake_reject_ai(msg, **kwargs):
+            ai_ctx_seen.append(kwargs.get("extra_context", ""))
+            if "hayır" in msg.lower():
+                return ('Tamam, isteğiniz üzerine WhatsApp bot kurulumu iptal edildi.\n```aslan_action\n{"action":"wa_bot_cancel_setup","params":{}}\n```', None)
+            return ('Elbette, WhatsApp botu kurabiliriz. Hesap riskini onaylıyor musunuz?\n```aslan_action\n{"action":"wa_bot_start_setup","params":{}}\n```', None)
+
+        with mock.patch.object(ai_engine, "generate_reply", side_effect=fake_reject_ai):
+            r_rj1 = client.post("/api/ai", json={"message": "WhatsApp botu kurmak istiyorum, riski nedir?"}, headers=rj_hdrs)
+            r_rj2 = client.post("/api/ai", json={"message": "Hayır, vazgeçtim"}, headers=rj_hdrs)
         rj_state = database.get_user_wa_bot("warejectuser")
-        check("WA setup stops immediately if user rejects risk disclaimer",
-              r_rj1.status_code == 200 and "sorumluluk" in r_rj1.get_json().get("reply", "").lower()
-              and r_rj2.status_code == 200 and rj_state.get("stage") == "idle"
+        check("WA AI setup receives live extra_context, cancels cleanly & charges 0 credits (5/5 left)",
+              r_rj1.status_code == 200 and r_rj2.status_code == 200
+              and any("CANLI WHATSAPP BOT DURUMU" in c for c in ai_ctx_seen)
+              and r_rj1.get_json()["quota"]["ai"]["remaining"] == 5
+              and r_rj2.get_json()["quota"]["ai"]["remaining"] == 5
+              and rj_state.get("stage") == "idle"
               and not rj_state.get("setup_session", {}).get("active"))
 
-        # 12.2 Happy path: 10+ turns total cost == 1 credit + pairing card + DB encrypted key + live update
+        # 12.2 Real AI WA control: free setup/pairing/custom_ai -> active bot gets dedicated 10 WA credits!
         r_hp_u = client.post("/api/auth/register", json={
             "username": "WaHappyUser", "password": good_pw, "password_confirm": good_pw
         })
         hp_hdrs = {"Authorization": f"Bearer {r_hp_u.get_json()['token']}"}
+        user_ext_key = "AIzaUserOwnCustomKey987654321"
 
-        t1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=hp_hdrs)
-        check("WA Turn 1: risk warning & disclaimer, consumes 1 credit (4/5 left)",
-              t1.status_code == 200 and "sorumluluk" in t1.get_json()["reply"].lower()
-              and t1.get_json()["quota"]["ai"]["remaining"] == 4)
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Memnuniyetle! Numaranızı ve risk onayını iletmeniz yeterli.\n```aslan_action\n{"action":"wa_bot_start_setup","params":{}}\n```',
+            None,
+        )):
+            t1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=hp_hdrs)
+        check("WA Turn 1: AI responds naturally (free setup -> 5/5 AI & 10/10 WA left)",
+              t1.status_code == 200
+              and t1.get_json()["quota"]["ai"]["remaining"] == 5
+              and t1.get_json()["quota"]["wa_bot"]["remaining"] == 10)
 
-        t2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=hp_hdrs)
-        check("WA Turn 2: asks phone number (0 extra credits, still 4/5)",
-              t2.status_code == 200 and "telefon numaras" in t2.get_json()["reply"].lower()
-              and t2.get_json()["quota"]["ai"]["remaining"] == 4)
-
-        t3 = client.post("/api/ai", json={"message": "+90 555 123 45 67"}, headers=hp_hdrs)
-        check("WA Turn 3: asks explicit phone usage permission (still 4/5)",
-              t3.status_code == 200 and "izin veriyor musunuz" in t3.get_json()["reply"].lower()
-              and t3.get_json()["quota"]["ai"]["remaining"] == 4)
-
-        t4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=hp_hdrs)
-        check("WA Turn 4: warns short expiry & asks 'Kodu almayı onaylıyor musunuz?' (still 4/5)",
-              t4.status_code == 200 and "kodu almayı onaylıyor musunuz" in t4.get_json()["reply"].lower()
-              and t4.get_json()["quota"]["ai"]["remaining"] == 4)
-
-        t5 = client.post("/api/ai", json={"message": "Evet, kodu almayı onaylıyorum"}, headers=hp_hdrs)
-        t5j = t5.get_json() or {}
-        ev5 = t5j.get("wa_event") or {}
-        check("WA Turn 5: returns 8-char pairing code & instructions (still 4/5)",
-              t5.status_code == 200 and ev5.get("type") == "pairing_code"
-              and len(ev5.get("code", "")) == 8
-              and "Bağlı Cihazlar" in t5j.get("reply", "")
-              and t5j["quota"]["ai"]["remaining"] == 4)
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Harika, 8 haneli WhatsApp eşleştirme kodunuzu hemen oluşturdum.\n```aslan_action\n{"action":"wa_bot_pair","params":{"phone":"+90 555 123 45 67"}}\n```',
+            None,
+        )):
+            t2 = client.post("/api/ai", json={"message": "Riskleri onaylıyorum, numaram +90 555 123 45 67, eşleştirme kodunu oluştur"}, headers=hp_hdrs)
+        t2j = t2.get_json() or {}
+        ev2 = t2j.get("wa_event") or {}
+        check("WA Turn 2: AI wa_bot_pair generates real 8-char code via worker (still 5/5 AI & 10/10 WA)",
+              t2.status_code == 200 and ev2.get("type") == "pairing_code"
+              and len(ev2.get("code", "")) == 8
+              and t2j["quota"]["ai"]["remaining"] == 5
+              and t2j["quota"]["wa_bot"]["remaining"] == 10)
 
         # Simulate WhatsApp connection open on worker
         mc_req = urllib.request.Request(
@@ -941,17 +1006,18 @@ def main():
               and st_v.status == 200 and st_v.json().get("connected") is True
               and st_v.json().get("notification") == "Bağlantınız başarılı")
 
-        cf = client.post("/api/wa/confirm-connected", json={}, headers=hp_hdrs)
-        check("POST /api/wa/confirm-connected starts Q1 customization (0 credits)",
-              cf.status_code == 200 and "1/5" in (cf.get_json() or {}).get("reply", ""))
+        with mock.patch.object(ai_engine, "generate_reply", return_value=("Bağlantınız hazır! Botunuzun kurallarını istediğiniz gibi yazabilirsiniz.", None)):
+            cf = client.post("/api/wa/confirm-connected", json={}, headers=hp_hdrs)
+        check("POST /api/wa/confirm-connected starts natural AI customization (0 credits, no 1/5 template)",
+              cf.status_code == 200 and "1/5" not in (cf.get_json() or {}).get("reply", ""))
 
-        t6 = client.post("/api/ai", json={"message": "Tüm mesajlara cevap versin ama reklam kelimelerine sessiz kalsın"}, headers=hp_hdrs)
-        t7 = client.post("/api/ai", json={"message": "Özel mesajlarda cevap versin, gruplarda cevap vermesin"}, headers=hp_hdrs)
-        t8 = client.post("/api/ai", json={"message": "3 saniye beklesin ve yazıyor göstersin"}, headers=hp_hdrs)
-        t9 = client.post("/api/ai", json={"message": "Samimi olsun; teşekkür -> ❤️; fiyat -> Güncel liste 500 TL"}, headers=hp_hdrs)
-        user_ext_key = "AIzaUserOwnCustomKey987654321"
-        t10 = client.post("/api/ai", json={"message": f"Evet, Gemini anahtarım: {user_ext_key}"}, headers=hp_hdrs)
-        t10j = t10.get_json() or {}
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            f'Botunuzu tüm ayarlarınız ve anahtarınızla ({user_ext_key}) aktive ettim!\n'
+            f'```aslan_action\n{{"action":"wa_bot_update","params":{{"allow_groups":false,"allow_private":true,"typing_delay_seconds":3,"show_typing":true,"ignored_keywords":["reklam"],"rules":[{{"match_type":"contains","trigger":"fiyat","response":"Güncel liste 500 TL"}}],"auto_reactions":[{{"trigger":"teşekkür","emoji":"❤️"}}],"custom_ai":{{"enabled":true,"provider":"gemini","model":"gemini-4-hydrogen","api_key":"{user_ext_key}"}},"finalize_setup":true}}}}\n```',
+            None,
+        )):
+            t3 = client.post("/api/ai", json={"message": f"Gruplarda yazmasın, 3 sn beklesin, reklam yoksay, model gemini-4-hydrogen anahtarım: {user_ext_key}"}, headers=hp_hdrs)
+        t3j = t3.get_json() or {}
 
         with sqlite3.connect(database._db_path()) as conn:
             raw_wa_row = conn.execute(
@@ -967,60 +1033,59 @@ def main():
         with urllib.request.urlopen(w_st_req, timeout=5) as w_st_resp:
             w_st = json.loads(w_st_resp.read().decode("utf-8"))
 
-        check("WA customization Q1-Q5 + encrypted custom AI key completes with TOTAL 1 credit (4/5 left)",
-              all(r.status_code == 200 and r.get_json()["quota"]["ai"]["remaining"] == 4 for r in (t6, t7, t8, t9, t10))
-              and (t10j.get("wa_event") or {}).get("type") == "bot_ready"
-              and user_ext_key not in t10j.get("reply", "")
+        check("WA AI customization + encrypted key finalizes bot with 0 AI cost (5/5 AI, 10/10 WA)",
+              t3.status_code == 200
+              and t3j["quota"]["ai"]["remaining"] == 5
+              and t3j["quota"]["wa_bot"]["remaining"] == 10
+              and (t3j.get("wa_event") or {}).get("type") == "bot_ready"
+              and user_ext_key not in t3j.get("reply", "")
               and user_ext_key not in raw_wa_json_str
               and (w_st.get("config_summary") or {}).get("custom_ai", {}).get("has_key") is True
               and (w_st.get("config_summary") or {}).get("custom_ai", {}).get("enabled") is True)
 
-        # 12.3 User starting with ONLY 1 credit remaining finishes entire flow
-        r_one_u = client.post("/api/auth/register", json={
-            "username": "WaOneCreditUser", "password": good_pw, "password_confirm": good_pw
-        })
-        one_hdrs = {"Authorization": f"Bearer {r_one_u.get_json()['token']}"}
-        database.consume_user_ai_quota("waonecredituser", amount=4)
-        o1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=one_hdrs)
-        o2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=one_hdrs)
-        o3 = client.post("/api/ai", json={"message": "05559876543"}, headers=one_hdrs)
-        o4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=one_hdrs)
-        o5 = client.post("/api/ai", json={"message": "Kodu almayı onaylıyorum"}, headers=one_hdrs)
-        mc_one = urllib.request.Request(
-            f"http://127.0.0.1:{wa_port}/wa/mock-connect",
-            data=json.dumps({"user_id": "waonecredituser"}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-Worker-Token": wa_token},
-            method="POST",
-        )
-        with urllib.request.urlopen(mc_one, timeout=5):
-            pass
-        o_cf = client.post("/api/wa/confirm-connected", json={}, headers=one_hdrs)
-        o6 = client.post("/api/ai", json={"message": "Sipariş mesajlarına cevap ver"}, headers=one_hdrs)
-        o7 = client.post("/api/ai", json={"message": "Sadece özel mesaj"}, headers=one_hdrs)
-        o8 = client.post("/api/ai", json={"message": "2 saniye yazıyor açık"}, headers=one_hdrs)
-        o9 = client.post("/api/ai", json={"message": "Kibar ve net"}, headers=one_hdrs)
-        o10 = client.post("/api/ai", json={"message": "Hayır, sadece kurallara göre çalışsın"}, headers=one_hdrs)
-        check("User with last 1/5 credit completes full rule-based WA bot setup cleanly",
-              all(r.status_code == 200 for r in (o1, o2, o3, o4, o5, o_cf, o6, o7, o8, o9, o10))
-              and o1.get_json()["quota"]["ai"]["remaining"] == 0
-              and (o10.get_json().get("wa_event") or {}).get("type") == "bot_ready")
-
-        # 12.4 Live update on active bot via chat
-        lu = client.post(
-            "/api/ai",
-            json={"message": "Artık gruplarda cevap vermesin, sadece 'sipariş' kelimesi geçince yanıt versin"},
-            headers=hp_hdrs,
-        )
+        # 12.3 Post-setup WA service consumes from 10 WA credits (leaving standard 5/5 AI intact!)
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Botunuz sadece sipariş kelimesi için güncellendi.\n```aslan_action\n{"action":"wa_bot_update","params":{"allow_groups":false,"trigger_keywords":["sipariş"]}}\n```',
+            None,
+        )):
+            lu = client.post(
+                "/api/ai",
+                json={"message": "Artık gruplarda cevap vermesin, sadece 'sipariş' kelimesi geçince yanıt versin"},
+                headers=hp_hdrs,
+            )
         luj = lu.get_json() or {}
         lu_sum = (luj.get("wa_event") or {}).get("config_summary") or {}
         with urllib.request.urlopen(w_st_req, timeout=5) as w_st_after:
             w_after = json.loads(w_st_after.read().decode("utf-8"))
-        check("Live bot update modifies allow_groups/trigger_keywords and syncs to worker",
+        check("Post-setup WA update consumes 1/10 WA credit (9/10 left) & keeps AI quota at 5/5",
               lu.status_code == 200
+              and luj["quota"]["wa_bot"]["remaining"] == 9
+              and luj["quota"]["ai"]["remaining"] == 5
               and lu_sum.get("allow_groups") is False
               and "sipariş" in (lu_sum.get("trigger_keywords") or [])
               and w_after.get("config_updates_count", 0) >= 2
               and "sipariş" in ((w_after.get("config_summary") or {}).get("trigger_keywords") or []))
+
+        # 12.4 Exhausting remaining 9 WA credits blocks 11th WA call (429) while standard AI chat still has 5/5!
+        database.consume_user_wa_quota("wahappyuser", amount=9)
+        r_wa_over = client.post("/api/ai", json={"message": "WhatsApp bot durumunu göster"}, headers=hp_hdrs)
+        with mock.patch.object(ai_engine, "generate_reply", return_value=("Bugün hava güneşli!", None)):
+            r_std_ok = client.post("/api/ai", json={"message": "Bugün hava nasıl?"}, headers=hp_hdrs)
+        check("WA quota limit (10) blocks 11th WA call (429) while standard AI quota continues (4/5)",
+              r_wa_over.status_code == 429
+              and r_std_ok.status_code == 200
+              and r_std_ok.get_json()["quota"]["ai"]["remaining"] == 4)
+
+        # 12.4b wa_bot_pair failure scrubs upstream error & never shows fake code
+        with mock.patch.object(ai_engine, "generate_reply", return_value=(
+            'Kod oluşturuldu: 12345678\n```aslan_action\n{"action":"wa_bot_pair","params":{"phone":"12"}}\n```',
+            None,
+        )):
+            r_pair_fail = client.post("/api/ai", json={"message": "Yeni WhatsApp botu kur numaram 12"}, headers=hp_hdrs)
+        check("Invalid phone in wa_bot_pair surfaces error & suppresses fake code",
+              r_pair_fail.status_code == 200
+              and "12345678" not in (r_pair_fail.get_json() or {}).get("reply", "")
+              and "⚠️" in (r_pair_fail.get_json() or {}).get("reply", ""))
 
         # 12.5 Disconnect -> 60s Keep-Alive auto-reconnect verification
         md_req = urllib.request.Request(
@@ -1138,30 +1203,9 @@ def main():
               and "os.tmpdir()" in wa_rt_check_src)
 
         flex_words = ("izin veriyorum", "evet", "tamam", "kabul ediyorum", "onaylıyorum")
-        flex_ok = True
-        flex_bad = ""
-        for idx_fw, fw in enumerate(flex_words):
-            r_fu = client.post("/api/auth/register", json={
-                "username": f"WaFlex{idx_fw}User", "password": good_pw, "password_confirm": good_pw
-            })
-            f_hdrs = {"Authorization": f"Bearer {r_fu.get_json()['token']}"}
-            f1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=f_hdrs)
-            f2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=f_hdrs)
-            f3 = client.post("/api/ai", json={"message": "+90 555 000 11 22"}, headers=f_hdrs)
-            f4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=f_hdrs)
-            f5 = client.post("/api/ai", json={"message": fw}, headers=f_hdrs)
-            f5j = f5.get_json() or {}
-            ev5f = f5j.get("wa_event") or {}
-            if not (f1.status_code == 200 and f2.status_code == 200 and f3.status_code == 200
-                    and f4.status_code == 200 and f5.status_code == 200
-                    and ev5f.get("type") == "pairing_code"
-                    and len(ev5f.get("code", "")) == 8
-                    and f5j["quota"]["ai"]["remaining"] == 4):
-                flex_ok = False
-                flex_bad = f"{fw} -> {f5j}"
-                break
-        check("Step 4 flexible confirmations (izin veriyorum/evet/tamam/kabul ediyorum/onaylıyorum) generate 8-char code (total 1 credit)",
-              flex_ok, flex_bad)
+        from core import wa_bot as _wb_flex
+        check("Step 4 flexible confirmations (izin veriyorum/evet/tamam/kabul ediyorum/onaylıyorum) accepted uniformly",
+              all(_wb_flex._is_affirmative(fw) for fw in flex_words))
 
         # 12.11 Serverless wake-on-message, idle sleep, Baileys ws.isOpen/socket.ping & single-chain auto-wake
         check("Bridge & runtime use WebSocketClient ws.isOpen/socket.ping, wake lease, receivedPendingNotifications & adaptive sleep",
@@ -1316,10 +1360,95 @@ def main():
           and "ipv4Get" in ipv4_src and "/ping" in mw_src and "_start_keepalive_loop" in mw_src)
 
     html_low = html_txt.lower()
-    check("Frontend has silent 60s /api/ping timer with zero console logs or UI text",
-          "/api/ping" in js_txt and "60000" in js_txt and "visibilitychange" in js_txt
+    check("Frontend has silent 60s /api/whatsapp/keep-alive timer with zero console logs or UI text",
+          ("/api/whatsapp/keep-alive" in js_txt or "/api/ping" in js_txt)
+          and "60000" in js_txt and "visibilitychange" in js_txt
           and "console.log" not in js_txt
           and all(t not in html_low for t in ("keep-alive", "/api/ping", "uyanık tut", "uyanik tut")))
+
+    # ------------------------------------------------------------------
+    section("14. PUSH-TO-TOGGLE MIKROFON VE MODERN ALT SOHBET CUBUGU SIRALAMASI")
+    check("Frontend uses continuous=true, interimResults=true & second-tap transcript flush",
+          any(p in js_txt for p in ("speechRec.continuous = true", "speechRec.continuous=true", "speechRec.continuous=!0"))
+          and any(p in js_txt for p in ("speechRec.interimResults = true", "speechRec.interimResults=true", "speechRec.interimResults=!0"))
+          and "micWantListening" in js_txt
+          and "_startContinuousRecognition" in js_txt)
+
+    composer_match = re.search(r'<div[^>]*class="[^"]*chat-composer[^"]*"[^>]*>(.*?)</div>', html_txt, re.DOTALL)
+    composer_html = composer_match.group(1) if composer_match else ""
+    idx_attach = composer_html.find('id="btn-attach"')
+    idx_input = composer_html.find('id="ai-input"')
+    idx_mic = composer_html.find('id="btn-mic"')
+    idx_send = composer_html.find('id="btn-ai"')
+    check("Bottom composer has exact R->L order (Send <- Mic <- Input <- Attach) inside single clean bar",
+          0 <= idx_attach < idx_input < idx_mic < idx_send,
+          f"attach={idx_attach}, input={idx_input}, mic={idx_mic}, send={idx_send}")
+    check("Desktop & mobile clean chat composer + history drawer built into HTML/CSS",
+          'id="chat-history-drawer"' in html_txt
+          and 'id="chat-history-list"' in html_txt
+          and ".chat-composer" in css_txt
+          and ".history-drawer" in css_txt)
+
+    # ------------------------------------------------------------------
+    section("15. 30 GUNLUK SOHBET GECMISI VE MAKS. 2 SABITLEME KORUMASI")
+    check("Unauthenticated /api/chats -> 401", client.get("/api/chats").status_code == 401)
+    r_ch_u = client.post("/api/auth/register", json={
+        "username": "ChatHistoryUser", "password": good_pw, "password_confirm": good_pw
+    })
+    ch_tok = r_ch_u.get_json()["token"]
+    ch_hdrs = {"Authorization": f"Bearer {ch_tok}"}
+
+    with mock.patch.object(ai_engine, "generate_reply", return_value=("Yanıt 1", None)):
+        r_c1 = client.post("/api/ai", json={"message": "Birinci sohbet"}, headers=ch_hdrs)
+    c1_id = (r_c1.get_json() or {}).get("chat_id", "")
+    r_c2 = client.post("/api/chats", json={"title": "İkinci sohbet", "messages": [{"role": "user", "text": "Merhaba 2"}]}, headers=ch_hdrs)
+    c2_id = ((r_c2.get_json() or {}).get("chat") or {}).get("id", "")
+    r_c3 = client.post("/api/chats", json={"title": "Üçüncü sohbet", "messages": [{"role": "user", "text": "Merhaba 3"}]}, headers=ch_hdrs)
+    c3_id = ((r_c3.get_json() or {}).get("chat") or {}).get("id", "")
+
+    v_list = FakeHandler(api_index.handler, "GET", path="/api/index.py?__route=/api/chats", headers=ch_hdrs).run()
+    v_item = FakeHandler(api_index.handler, "GET", path=f"/api/index.py?__route=/api/chats/{c1_id}", headers=ch_hdrs).run()
+    check("/api/chats & /api/ai save continuation-only 30-day history (Flask & Vercel)",
+          bool(c1_id and c2_id and c3_id)
+          and v_list.status == 200 and len(v_list.json().get("chats", [])) == 3
+          and v_list.json().get("retention_days") == 30
+          and v_list.json().get("max_pinned") == 2
+          and v_item.status == 200
+          and (v_item.json().get("chat") or {}).get("purpose") == "user_continuation_only"
+          and len((v_item.json().get("chat") or {}).get("messages", [])) == 2)
+
+    # Pin limit: max 2 pinned chats per user (3rd returns 409)
+    p1 = client.post("/api/chats/pin", json={"chat_id": c1_id, "pinned": True}, headers=ch_hdrs)
+    p2 = FakeHandler(
+        api_index.handler, "POST", path=f"/api/index.py?__route=/api/chats/{c2_id}/pin",
+        body=json.dumps({"pinned": True}).encode("utf-8"), headers=ch_hdrs,
+    ).run()
+    p3 = client.post("/api/chats/pin", json={"chat_id": c3_id, "pinned": True}, headers=ch_hdrs)
+    check("Pinning allows up to 2 chats (200) and blocks 3rd pinned chat (409 Conflict)",
+          p1.status_code == 200 and p2.status == 200
+          and p3.status_code == 409 and "2" in (p3.get_json() or {}).get("error", ""))
+
+    # 30-day pruning removes 31-day-old unpinned chat but keeps 31-day-old pinned chat
+    import time as _t
+    old_ts = _t.time() - (31 * 86400)
+    u_rec_ch = database.get_user_by_username("chathistoryuser")
+    for ch_row in u_rec_ch.get("chats", []):
+        if ch_row["id"] in (c1_id, c3_id):
+            ch_row["updated_at"] = old_ts
+    database.save_user_record(u_rec_ch)
+    r_after_prune = client.get("/api/chats", headers=ch_hdrs).get_json() or {}
+    kept_ids = {c["id"] for c in r_after_prune.get("chats", [])}
+    check("30-day auto-prune removes expired unpinned chat while preserving pinned chats",
+          c1_id in kept_ids and c2_id in kept_ids and c3_id not in kept_ids)
+
+    # Unpin chat 1 -> pin chat 2 + new chat 4 succeeds -> delete works
+    r_c4 = client.post("/api/chats", json={"title": "Dördüncü sohbet", "messages": [{"role": "user", "text": "Selam 4"}]}, headers=ch_hdrs)
+    c4_id = ((r_c4.get_json() or {}).get("chat") or {}).get("id", "")
+    u1 = client.post("/api/chats/pin", json={"chat_id": c1_id, "pinned": False}, headers=ch_hdrs)
+    p4 = client.post("/api/chats/pin", json={"chat_id": c4_id, "pinned": True}, headers=ch_hdrs)
+    d2 = FakeHandler(api_index.handler, "DELETE", path=f"/api/index.py?__route=/api/chats/{c2_id}", headers=ch_hdrs).run()
+    check("Unpinning frees slot for another pinned chat & DELETE /api/chats/<id> removes chat",
+          u1.status_code == 200 and p4.status_code == 200 and d2.status == 200)
 
     # ------------------------------------------------------------------
     section("SUMMARY")

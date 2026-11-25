@@ -47,6 +47,11 @@ DB_FILE = os.path.join(DATA_DIR, "aslan_users.db")
 # ---------------------------------------------------------------- limitler
 AI_DAILY_LIMIT = 5            # gunluk AI mesaj hakki (hesaba bagli)
 IMAGE_MONTHLY_LIMIT = 2       # aylik toplam gorsel hakki (kati takvim ayi siniri)
+WA_BOT_QUOTA_LIMIT = 10       # kurulum sonrasi WhatsApp bot hizmeti toplam hakki
+CHAT_HISTORY_RETENTION_DAYS = 30
+MAX_PINNED_CHATS = 2
+MAX_SAVED_CHATS = 40
+MAX_CHAT_MESSAGES = 60
 
 # Ikincil IP bazli kotu ye kullanim koruma limitleri
 IP_AI_DAILY_LIMIT = 60
@@ -90,17 +95,28 @@ ALLOWED_UPLOAD_EXTS = frozenset({
 POLLINATIONS_TEXT_OPENAI = "https://text.pollinations.ai/openai"
 POLLINATIONS_TEXT_POST = "https://text.pollinations.ai/"
 POLLINATIONS_TEXT_GET = "https://text.pollinations.ai"
-POLLINATIONS_TEXT_MODELS = ("openai", "mistral", "openai-large")
+POLLINATIONS_TEXT_MODELS = ("openai-fast", "openai", "mistral")
+
+DDG_STATUS_URL = "https://duckduckgo.com/duckchat/v1/status"
+DDG_CHAT_URL = "https://duckduckgo.com/duckchat/v1/chat"
+DDG_TEXT_MODEL = "gpt-4o-mini"
+
+DEEPINFRA_CHAT_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+DEEPINFRA_TEXT_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
+
+HF_CHAT_URL = "https://router.huggingface.co/v1/chat/completions"
+HF_TEXT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
 
 # Mevcut Gemini API yapilandirmasi (son durak yedek + multimodal/gorsel)
-GEMINI_TEXT_MODEL = "gemini-3.5-flash-lite"
-GEMINI_LITE_MODEL = "gemini-3.5-flash-lite"
+GEMINI_TEXT_MODEL = "gemini-4-hydrogen"
+GEMINI_LITE_MODEL = "gemini-4-hydrogen"
 GEMINI_IMAGE_MODEL = "imagen-3.0-fast-generate-001"
 GEMINI_FALLBACK_MODELS = (
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-3.8-flash",
     "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-flash-latest",
 )
 
 # Gorsel uretimi deneme sirasi (Gemini yalnizca son durak yedegi)

@@ -99,6 +99,7 @@ function applyQuotaSnapshot(snap) {
     if (!snap) return;
     if (snap.ai) state.quota.ai = snap.ai;
     if (snap.image) state.quota.image = snap.image;
+    if (snap.wa_bot) state.quota.wa_bot = snap.wa_bot;
     renderQuota();
 }
 
@@ -112,13 +113,21 @@ function renderQuota() {
     if (el && img) {
         var lim = typeof img.monthly_limit === 'number' ? img.monthly_limit : IMAGE_MONTHLY_MAX;
         var rem = typeof img.monthly_remaining === 'number' ? img.monthly_remaining : (typeof img.remaining === 'number' ? img.remaining : lim);
-        el.textContent = 'Aylık Görsel: ' + rem + '/' + lim + (rem <= 0 ? ' (Bu ayki hak doldu)' : '');
+        el.textContent = rem + '/' + lim;
         el.classList.toggle('warn', rem <= 0);
         var genBtn = $('btn-generate-image');
         if (genBtn) {
             genBtn.disabled = rem <= 0;
             genBtn.textContent = rem <= 0 ? ('🎨 Aylık Görsel Hakkı Doldu (0/' + lim + ')') : '🎨 Görsel Üret';
         }
+    }
+    var wb = state.quota.wa_bot;
+    var wbEl = $('wa-quota-display');
+    if (wbEl && wb) {
+        var wbLim = typeof wb.limit === 'number' ? wb.limit : 10;
+        var wbRem = typeof wb.remaining === 'number' ? wb.remaining : wbLim;
+        wbEl.textContent = wbRem + '/' + wbLim;
+        wbEl.classList.toggle('warn', wbRem <= 0);
     }
 }
 
@@ -230,6 +239,7 @@ function completeAuthSuccess(data, toastMsg) {
     saveStoredAuth(data.user, data.token);
     if (data.quota) applyQuotaSnapshot(data.quota);
     closeAuthModal();
+    if (typeof loadSavedChats === 'function') loadSavedChats();
     var dest = state.authReturnTab || 'ai';
     state.authReturnTab = '';
     if (dest !== 'tts' && dest !== 'ai') dest = 'ai';
@@ -369,6 +379,9 @@ async function logoutUser() {
     } catch (e) {}
     saveStoredAuth(null, '');
     state.chatHistory = [];
+    state.activeChatId = '';
+    state.savedChats = [];
+    if (typeof renderSavedChats === 'function') renderSavedChats();
     sfx('click');
     showToast('Oturum kapatıldı.', 'info');
 }

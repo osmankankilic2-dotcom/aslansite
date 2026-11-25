@@ -138,7 +138,16 @@ Kullanilabilir action degerleri:
 - tts_control            -> Ses studyosunu kontrol eder (command: "play" | "stop" | "pause" | "settings")
 - generate_image         -> Metinden gorsel uretir: {"action":"generate_image","files":[],"params":{"prompt":"..."}}
 - social_download        -> Video baglantisindan medya indirir (gizli sohbet yetenegi): {"action":"social_download","files":[],"params":{"url":"https://..."}}
-- wa_bot_update          -> Aktif WhatsApp bot ayarlarini canli gunceller: {"action":"wa_bot_update","files":[],"params":{"enabled":true,"allow_groups":false,"allow_private":true,"group_mode":"off","trigger_keywords":["..."],"ignored_keywords":["..."],"typing_delay_seconds":3,"show_typing":true,"tone":"...","instructions":"...","default_reply":"..."}}
+- Control & Configure Aslan AI WhatsApp Bot (NO static templates):
+  * NEVER use rigid numbered wizards (do NOT say "1/5", "2/5" etc.); converse naturally, intelligently, and directly adapt to what the user asks, including which AI model/provider, phone number, rules, delays, or questions they mention.
+  * Available WhatsApp bot actions:
+    - wa_bot_start_setup   -> Marks setup/pairing guidance active (uses EK BILGI live state): {"action":"wa_bot_start_setup","files":[],"params":{"phone":"+90555...","risk_accepted":true,"phone_consent":true}}
+    - wa_bot_pair          -> Connects real-time WhatsApp session & generates 8-char pairing code: {"action":"wa_bot_pair","files":[],"params":{"phone":"905551234567"}} (ONLY invoke after the user was warned about temporary restriction/suspension risk + sole responsibility AND confirmed pairing their phone number! If they already explicitly consented & provided a valid phone number in the conversation, call wa_bot_pair right away.)
+    - wa_bot_status        -> Queries live WhatsApp session status in real time: {"action":"wa_bot_status","files":[],"params":{}}
+    - wa_bot_update        -> Updates WhatsApp bot rules, tone, groups, typing delay, or custom AI provider/model/key (set finalize_setup=true once initial customization is ready): {"action":"wa_bot_update","files":[],"params":{"enabled":true,"allow_groups":false,"allow_private":true,"group_mode":"off","trigger_keywords":["..."],"ignored_keywords":["..."],"typing_delay_seconds":2,"show_typing":true,"tone":"...","instructions":"...","default_reply":"...","rules":[{"match_type":"contains","trigger":"...","response":"..."}],"auto_reactions":[{"trigger":"...","emoji":"❤️"}],"custom_ai":{"enabled":true,"provider":"gemini","model":"gemini-4-hydrogen","api_key":"..."},"finalize_setup":true}}
+    - wa_bot_wake          -> Wakes the background WhatsApp bot session immediately: {"action":"wa_bot_wake","files":[],"params":{"force":true}}
+    - wa_bot_stop          -> Pauses or logs out the WhatsApp bot: {"action":"wa_bot_stop","files":[],"params":{"logout":false}}
+    - wa_bot_cancel_setup  -> Cancels an active setup session: {"action":"wa_bot_cancel_setup","files":[],"params":{}}
 - image_audio_video      -> Gorsel + sesi videoya donusturur (files: [gorsel_id_veya_$last_image, ses_id_veya_$last_audio])
 - add_text               -> Gorsel veya videoya yazi ekler (params: text, position "top"|"center"|"bottom", font_size, color)
 - burn_subtitles         -> Videoya altyazi ekler (params: srt veya subtitles [{"start":0,"end":2.5,"text":"..."}])
@@ -167,7 +176,7 @@ KURALLAR:
 - Video indirme arayuzde gizlidir ancak sohbet icinde TAM AKTIFTIR: kullanici "Video indirebiliyor musun?" diye sorarsa olumlu yanit ver ("Evet, video bağlantısını paylaşırsanız Aslan AI ile indirebilir ve dilerseniz ardından kırpma, ses çıkarma veya yazı ekleme gibi düzenlemeler yapabilirim."), arka plan kutuphane/arac adlarini asla anma.
 - Kullanici video linki verip "bu videoyu indir" derse "social_download" kullan; sonraki mesajda "indirdigin videoyu kirp / sesini ayir / yazi ekle" derse listedeki mevcut dosya kimligini ($last_video veya yuklenen dosya id'sini) files icine yaz.
 - Kullanici "bunu sesli oku", "hizi artir", "sesi Emel yap", "okumayi durdur" derse uygun "tts" veya "tts_control" blogunu ekle.
-- Kullanici mevcut WhatsApp botunda ayar degisikligi isterse "wa_bot_update" action blogu kullan ve asla kutuphane/protokol adi soyleme.
+- Kullanici mevcut veya yeni WhatsApp botundan bahsettiginde, kurulum sordugunda, numara veya yapay zeka modeli belirttiginde asla kalip/sabit sablon metinler yazma; EK BILGI bolumundeki canli WhatsApp durumuna gore dogal ve akilli sohbet et ve uygun "wa_bot_*" action blogunu kullan. Asla arka plan kutuphane/protokol adi (Baileys, Vercel vb.) veya kullanicinin ham API anahtarini yanitta yazma.
 - Kullanici "iki gorsel uret, birlestirip video yap ve ses ekle" gibi cok adimli istekte bulunursa mutlaka "steps" dizisi kullan.
 - files icindeki degerler kullanicinin yukledigi/urettigi dosyalarin kimlikleridir (asagida listelenir) veya adim referanslaridir ($img1, $last_image, $last_video, $last_audio).
 - Eylem gerekmiyorsa aslan_action blogunu YAZMA.
@@ -212,13 +221,13 @@ def _build_contents(message, parts=None, history=None):
     return contents
 
 
-def _build_openai_messages(message, history=None, available_files=None, parts=None):
+def _build_openai_messages(message, history=None, available_files=None, parts=None, extra_context=''):
     """OpenAI uyumlu acik uc noktalar icin mesaj dizisi hazirlar."""
     text_chunks = []
     for p in (parts or []):
         if isinstance(p, dict) and p.get('text') and p.get('text') != message:
             text_chunks.append(str(p.get('text')))
-    messages = [{'role': 'system', 'content': build_system_prompt(available_files)}]
+    messages = [{'role': 'system', 'content': build_system_prompt(available_files, extra_context=extra_context)}]
     for turn in _sanitize_history(history):
         messages.append({
             'role': 'assistant' if turn['role'] == 'model' else 'user',
@@ -241,26 +250,172 @@ def _is_valid_free_reply(text: str) -> bool:
     return True
 
 
-def _try_free_endpoints(message, history=None, available_files=None, parts=None):
+def _ddg_fetch_vqd4(status_url: str, timeout: int = 6) -> str:
+    """DuckDuckGo AI Chat icin dogrudan x-vqd-4 oturum jetonu ister (PoW/JS cozulmez)."""
+    req = urllib.request.Request(
+        status_url,
+        headers={
+            'x-vqd-accept': '1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+            'Referer': 'https://duckduckgo.com/',
+        },
+        method='GET',
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return (resp.headers.get('x-vqd-4') or '').strip()
+
+
+def _parse_ddg_sse(raw_sse: str) -> str:
+    chunks = []
+    for line in str(raw_sse or '').splitlines():
+        line = line.strip()
+        if not line.startswith('data:'):
+            continue
+        data_part = line[5:].strip()
+        if not data_part or data_part == '[DONE]':
+            continue
+        try:
+            obj = json.loads(data_part)
+            if isinstance(obj, dict) and obj.get('message'):
+                chunks.append(str(obj['message']))
+        except Exception:
+            continue
+    return ''.join(chunks).strip()
+
+
+def _try_duckduckgo_ai(messages: list):
+    """DuckDuckGo AI Chat anonim ucretsiz uc noktasini dener (x-vqd-4 varsa)."""
+    status_url = getattr(cfg, 'DDG_STATUS_URL', '')
+    chat_url = getattr(cfg, 'DDG_CHAT_URL', '')
+    if not status_url or not chat_url:
+        return None
+    try:
+        vqd4 = _ddg_fetch_vqd4(status_url, timeout=6)
+        if not vqd4:
+            return None
+        convo = []
+        sys_txt = ''
+        for m in messages:
+            if m.get('role') == 'system':
+                sys_txt = str(m.get('content') or '')[:1600]
+            else:
+                role = 'assistant' if m.get('role') == 'assistant' else 'user'
+                content = str(m.get('content') or '')
+                if sys_txt and role == 'user' and not convo:
+                    content = sys_txt + '\n\nKullanici Mesaji:\n' + content
+                    sys_txt = ''
+                convo.append({'role': role, 'content': content})
+        raw = _post_raw_text(
+            chat_url,
+            {'model': getattr(cfg, 'DDG_TEXT_MODEL', 'gpt-4o-mini'), 'messages': convo},
+            timeout=15,
+            headers={
+                'x-vqd-4': vqd4,
+                'Accept': 'text/event-stream',
+                'Origin': 'https://duckduckgo.com',
+                'Referer': 'https://duckduckgo.com/',
+            },
+        )
+        txt = _parse_ddg_sse(raw)
+        if not txt and raw.strip().startswith('{'):
+            try:
+                parsed = json.loads(raw)
+                txt = str(parsed.get('message') or '').strip()
+            except Exception:
+                pass
+        if _is_valid_free_reply(txt):
+            return txt
+    except Exception:
+        return None
+    return None
+
+
+def _try_deepinfra_open(messages: list):
+    """DeepInfra acik OpenAI-uyumlu uc noktasini dener."""
+    url = getattr(cfg, 'DEEPINFRA_CHAT_URL', '')
+    if not url:
+        return None
+    headers = {'X-Deepinfra-Source': 'web-page'}
+    di_key = os.environ.get('DEEPINFRA_API_KEY', '').strip()
+    if di_key:
+        headers['Authorization'] = 'Bearer ' + di_key
+    try:
+        data = _post_json(
+            url,
+            {
+                'model': getattr(cfg, 'DEEPINFRA_TEXT_MODEL', 'meta-llama/Llama-3.3-70B-Instruct'),
+                'messages': messages,
+                'temperature': 0.7,
+            },
+            timeout=10,
+            headers=headers,
+        )
+        choices = data.get('choices') or []
+        content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+        if _is_valid_free_reply(content):
+            return content
+    except Exception:
+        return None
+    return None
+
+
+def _try_huggingface_open(messages: list):
+    """Hugging Face ucretsiz acik router uc noktasini dener."""
+    url = getattr(cfg, 'HF_CHAT_URL', '')
+    if not url:
+        return None
+    headers = {}
+    hf_tok = os.environ.get('HF_TOKEN', '').strip() or os.environ.get('HUGGINGFACEHUB_API_TOKEN', '').strip()
+    if hf_tok:
+        headers['Authorization'] = 'Bearer ' + hf_tok
+    try:
+        data = _post_json(
+            url,
+            {
+                'model': getattr(cfg, 'HF_TEXT_MODEL', 'Qwen/Qwen2.5-72B-Instruct'),
+                'messages': messages,
+                'temperature': 0.7,
+            },
+            timeout=10,
+            headers=headers or None,
+        )
+        choices = data.get('choices') or []
+        content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+        if _is_valid_free_reply(content):
+            return content
+    except Exception:
+        return None
+    return None
+
+
+def _try_free_endpoints(message, history=None, available_files=None, parts=None, extra_context=''):
     """
-    Hesap/API anahtari gerektirmeyen ucretsiz acik AI uc noktalarini sirayla dener.
+    Hesap/API anahtari gerektirmeyen ucretsiz acik AI uc noktalarini sirayla dener:
+      1) Pollinations AI (openai-fast OpenAI uc noktasi + GET yedegi)
+      2) DuckDuckGo AI Chat (anonim ucretsiz uc nokta)
+      3) DeepInfra & Hugging Face ucretsiz acik uc noktalari (+ FREE_AI_ENDPOINTS)
 
     Returns: (yanit_metni, hata_mesaji)
     """
     messages = _build_openai_messages(
-        message, history=history, available_files=available_files, parts=parts)
+        message,
+        history=history,
+        available_files=available_files,
+        parts=parts,
+        extra_context=extra_context,
+    )
     if not messages:
         return None, 'Mesaj bos'
 
     last_err = ''
 
-    # 1) Pollinations OpenAI-uyumlu acik uc noktasi (coklu ucretsiz model failover)
-    for free_model in getattr(cfg, 'POLLINATIONS_TEXT_MODELS', ('openai', 'mistral', 'openai-large')):
+    # 1) Pollinations OpenAI-uyumlu acik uc noktasi (openai-fast oncelikli)
+    for free_model in getattr(cfg, 'POLLINATIONS_TEXT_MODELS', ('openai-fast', 'openai', 'mistral')):
         try:
             data = _post_json(
                 cfg.POLLINATIONS_TEXT_OPENAI,
                 {'model': free_model, 'messages': messages, 'temperature': 0.7},
-                timeout=18,
+                timeout=16,
             )
             choices = data.get('choices') or []
             content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
@@ -269,40 +424,7 @@ def _try_free_endpoints(message, history=None, available_files=None, parts=None)
         except Exception as e:
             last_err = api_utils.safe_error_message(e)
 
-    # 2) Pollinations dogrudan POST metin uc noktasi
-    try:
-        raw = _post_raw_text(
-            cfg.POLLINATIONS_TEXT_POST,
-            {'model': 'openai', 'messages': messages},
-            timeout=18,
-        )
-        text = raw.strip()
-        if text.startswith('{'):
-            try:
-                parsed = json.loads(text)
-                choices = parsed.get('choices') or []
-                if choices:
-                    text = ((choices[0].get('message') or {}).get('content') or '').strip()
-            except Exception:
-                pass
-        if _is_valid_free_reply(text):
-            return text, None
-    except Exception as e:
-        last_err = api_utils.safe_error_message(e)
-
-    # 3) Opsiyonel topluluk / g4f uyumlu anahtarsiz proxy uc noktalari (FREE_AI_ENDPOINTS)
-    extra_urls = [u.strip() for u in os.environ.get('FREE_AI_ENDPOINTS', '').split(',') if u.strip()]
-    for url in extra_urls:
-        try:
-            data = _post_json(url, {'model': 'gpt-4o-mini', 'messages': messages}, timeout=15)
-            choices = data.get('choices') or []
-            content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
-            if _is_valid_free_reply(content):
-                return content, None
-        except Exception as e:
-            last_err = api_utils.safe_error_message(e)
-
-    # 4) Pollinations GET acik uc noktasi (kisa metin yedegi)
+    # 1b) Pollinations GET acik uc noktasi (kisa metin yedegi)
     try:
         user_msg = messages[-1]['content'][:1000]
         sys_short = (
@@ -310,19 +432,45 @@ def _try_free_endpoints(message, history=None, available_files=None, parts=None)
             'arka plandaki hicbir model, API veya kutuphane adini soyleme. '
             'Turkce, kisa, samimi ve yardimsever yanit ver.'
         )
-        qs = urllib.parse.urlencode({'model': 'openai', 'system': sys_short})
+        qs = urllib.parse.urlencode({'model': 'openai-fast', 'system': sys_short})
         url = '%s/%s?%s' % (cfg.POLLINATIONS_TEXT_GET, urllib.parse.quote(user_msg, safe=''), qs)
-        text = _get_raw_text(url, timeout=15).strip()
+        text = _get_raw_text(url, timeout=14).strip()
         if _is_valid_free_reply(text):
             return text, None
     except Exception as e:
         last_err = api_utils.safe_error_message(e)
 
-    return None, 'Aslan AI su an yanit veremedi. Lutfen tekrar deneyin.'
+    # 2) DuckDuckGo AI Chat ucretsiz anonim uc noktasi
+    ddg_reply = _try_duckduckgo_ai(messages)
+    if ddg_reply:
+        return ddg_reply, None
+
+    # 3) DeepInfra & Hugging Face acik uc noktalari
+    di_reply = _try_deepinfra_open(messages)
+    if di_reply:
+        return di_reply, None
+
+    hf_reply = _try_huggingface_open(messages)
+    if hf_reply:
+        return hf_reply, None
+
+    # 3b) Opsiyonel ek anahtarsiz acik uc noktalar (FREE_AI_ENDPOINTS)
+    extra_urls = [u.strip() for u in os.environ.get('FREE_AI_ENDPOINTS', '').split(',') if u.strip()]
+    for url in extra_urls:
+        try:
+            data = _post_json(url, {'model': 'gpt-4o-mini', 'messages': messages}, timeout=12)
+            choices = data.get('choices') or []
+            content = ((choices[0].get('message') or {}).get('content') or '').strip() if choices else ''
+            if _is_valid_free_reply(content):
+                return content, None
+        except Exception as e:
+            last_err = api_utils.safe_error_message(e)
+
+    return None, last_err or 'Aslan AI su an yanit veremedi. Lutfen tekrar deneyin.'
 
 
-def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, history=None):
-    """Kullanicinin mevcut Gemini API yapilandirmasiyla yanit uretir (son durak / multimodal)."""
+def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, history=None, extra_context=''):
+    """Kullanicinin mevcut Gemini API yapilandirmasiyla yanit uretir (son durak gemini-4-hydrogen + multimodal)."""
     key = api_key or get_api_key()
     if not key:
         return None, 'Aslan AI servisi su an kullanilamiyor.'
@@ -332,16 +480,16 @@ def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, h
 
     payload = {
         'contents': contents,
-        'systemInstruction': {'parts': [{'text': build_system_prompt(available_files)}]},
+        'systemInstruction': {'parts': [{'text': build_system_prompt(available_files, extra_context=extra_context)}]},
         'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2048},
     }
     headers = {'x-goog-api-key': key}
-    models = [GEMINI_TEXT_MODEL] + list(GEMINI_FALLBACK_MODELS)
+    models = [GEMINI_TEXT_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_TEXT_MODEL]
     last_error = 'Aslan AI su an yanit vermedi.'
     for model in models:
         url = '%s/%s:generateContent' % (GEMINI_ENDPOINT, model)
         try:
-            data = _post_json(url, payload, timeout=90, headers=headers)
+            data = _post_json(url, payload, timeout=45, headers=headers)
         except urllib.error.HTTPError:
             last_error = 'Aslan AI gecici olarak yanit veremedi. Lutfen tekrar deneyin.'
             continue
@@ -355,10 +503,10 @@ def _try_gemini_reply(message, parts=None, available_files=None, api_key=None, h
     return None, last_error
 
 
-def generate_reply(message, parts=None, available_files=None, api_key=None, history=None):
+def generate_reply(message, parts=None, available_files=None, api_key=None, history=None, extra_context=''):
     """
-    Metin isteklerinde once ucretsiz/anahtarsiz acik uclari dener;
-    hepsi hata verirse son durak olarak mevcut Gemini API yapilandirmasina gecer.
+    Metin isteklerinde once ucretsiz/anahtarsiz acik uclari dener (Pollinations -> DDG -> DeepInfra/HF);
+    hepsi hata verirse son durak olarak Gemini API (gemini-4-hydrogen) zincirine gecer.
     Multimodal (gorsel/ses/video/PDF) isteklerde dogrudan Gemini API kullanir.
 
     Returns: (yanit_metni, hata_mesaji)
@@ -375,22 +523,39 @@ def generate_reply(message, parts=None, available_files=None, api_key=None, hist
     free_err = ''
     if not has_binary:
         reply, free_err = _try_free_endpoints(
-            message, history=history, available_files=available_files, parts=parts)
+            message,
+            history=history,
+            available_files=available_files,
+            parts=parts,
+            extra_context=extra_context,
+        )
         if reply:
             return reply, None
 
     gem_reply, gem_err = _try_gemini_reply(
-        message, parts=parts, available_files=available_files, api_key=api_key, history=history)
+        message,
+        parts=parts,
+        available_files=available_files,
+        api_key=api_key,
+        history=history,
+        extra_context=extra_context,
+    )
     if gem_reply:
         return gem_reply, None
 
     return None, gem_err or free_err or 'Yanit alinamadi'
 
 
-def generate_reply_lite(message, parts=None, available_files=None, api_key=None, history=None):
+def generate_reply_lite(message, parts=None, available_files=None, api_key=None, history=None, extra_context=''):
     """Hafif modelle yanit uretir."""
-    return generate_reply(message, parts=parts, available_files=available_files,
-                          api_key=api_key, history=history)
+    return generate_reply(
+        message,
+        parts=parts,
+        available_files=available_files,
+        api_key=api_key,
+        history=history,
+        extra_context=extra_context,
+    )
 
 
 def _extract_text(data):
@@ -672,7 +837,7 @@ def normalize_tts_pitch(pitch: str) -> str:
 
 
 def synthesize_speech(text, voice=DEFAULT_VOICE, rate='+0%', pitch='+0Hz'):
-    """Metni sese donusturur. (ses_verisi_bytes, motor_adi) dondurur."""
+    """Metni sese donusturur (edge-tts -> HTTPS Google TTS -> gTTS). (ses_verisi_bytes, motor_adi) dondurur."""
     text = str(text or '').strip()
     if not text:
         return None, None
@@ -681,12 +846,16 @@ def synthesize_speech(text, voice=DEFAULT_VOICE, rate='+0%', pitch='+0Hz'):
     voice = normalize_tts_voice(voice)
     rate = normalize_tts_rate(rate)
     pitch = normalize_tts_pitch(pitch)
+    lang = 'en' if voice.startswith('en-') else 'tr'
 
     data, engine_name = _try_edge_tts(text, voice, rate=rate, pitch=pitch)
     if data:
         return data, engine_name
 
-    lang = 'en' if voice.startswith('en-') else 'tr'
+    data = _try_google_https_tts(text, lang=lang)
+    if data:
+        return data, 'https-tts'
+
     data = _try_gtts(text, lang=lang)
     if data:
         return data, 'gTTS'
@@ -695,28 +864,117 @@ def synthesize_speech(text, voice=DEFAULT_VOICE, rate='+0%', pitch='+0Hz'):
 
 async def _edge_tts_generate(text, voice, rate='+0%', pitch='+0Hz'):
     import edge_tts
-    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-        await communicate.save(tmp_path)
-        with open(tmp_path, 'rb') as f:
-            return f.read()
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    chunks = bytearray()
+    async for item in communicate.stream():
+        if isinstance(item, dict) and item.get('type') == 'audio' and item.get('data'):
+            chunks.extend(item['data'])
+    return bytes(chunks)
 
 
 def _try_edge_tts(text, voice, rate='+0%', pitch='+0Hz'):
-    for _ in range(3):
+    for _ in range(2):
         try:
-            return asyncio.run(_edge_tts_generate(text, voice, rate=rate, pitch=pitch)), 'edge-tts'
+            audio = asyncio.run(asyncio.wait_for(
+                _edge_tts_generate(text, voice, rate=rate, pitch=pitch),
+                timeout=10.0,
+            ))
+            if audio and len(audio) >= 128:
+                return audio, 'edge-tts'
         except Exception as e:
             err = str(e)
             if 'NoAudioReceived' in err or '403' in err:
                 continue
             break
     return None, None
+
+
+def _split_tts_chunks(text: str, max_len: int = 180) -> list:
+    clean = ' '.join(str(text or '').split()).strip()
+    if not clean:
+        return []
+    parts = []
+    sentences = re.split(r'(?<=[.!?;:])\s+', clean)
+    cur = ''
+    for seg in sentences:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if len(seg) <= max_len:
+            if cur and (len(cur) + 1 + len(seg)) <= max_len:
+                cur = cur + ' ' + seg
+            else:
+                if cur:
+                    parts.append(cur)
+                cur = seg
+        else:
+            if cur:
+                parts.append(cur)
+                cur = ''
+            words = seg.split(' ')
+            for w in words:
+                if len(w) > max_len:
+                    for k in range(0, len(w), max_len):
+                        parts.append(w[k:k + max_len])
+                    continue
+                if cur and (len(cur) + 1 + len(w)) <= max_len:
+                    cur = cur + ' ' + w
+                else:
+                    if cur:
+                        parts.append(cur)
+                    cur = w
+    if cur:
+        parts.append(cur)
+    return parts[:18]
+
+
+def _is_valid_mp3_bytes(blob: bytes) -> bool:
+    if not blob or len(blob) < 128:
+        return False
+    low_head = blob[:64].lstrip().lower()
+    if low_head.startswith(b'<!doctype') or low_head.startswith(b'<html'):
+        return False
+    return True
+
+
+def _fetch_tts_chunk_https(chunk: str, lang: str = 'tr') -> bytes:
+    qs_gtx = urllib.parse.urlencode({'client': 'gtx', 'ie': 'UTF-8', 'tl': lang, 'q': chunk})
+    qs_tw = urllib.parse.urlencode({'client': 'tw-ob', 'ie': 'UTF-8', 'tl': lang, 'q': chunk})
+    urls = (
+        'https://translate.googleapis.com/translate_tts?' + qs_gtx,
+        'https://translate.google.com/translate_tts?' + qs_tw,
+    )
+    for url in urls:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+                    'Referer': 'https://translate.google.com/',
+                },
+                method='GET',
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = resp.read()
+                if _is_valid_mp3_bytes(data):
+                    return data
+        except Exception:
+            continue
+    return b''
+
+
+def _try_google_https_tts(text: str, lang: str = 'tr') -> bytes:
+    """Guvenilir HTTPS MP3 seslendirme yedegi (parcali akis)."""
+    chunks = _split_tts_chunks(text, max_len=180)
+    if not chunks:
+        return b''
+    out = bytearray()
+    for ch in chunks:
+        part = _fetch_tts_chunk_https(ch, lang=lang)
+        if not part:
+            return b''
+        out.extend(part)
+    return bytes(out) if len(out) >= 128 else b''
 
 
 def _try_gtts(text, lang='tr'):
@@ -1025,12 +1283,46 @@ def run_action_pipeline(action_spec, uploaded_files=None, device_id=None, userna
                 return res, generated_images, created_paths
             continue
 
+        if name == 'wa_bot_start_setup':
+            from . import wa_bot
+            res = wa_bot.action_start_setup(username_lower, params)
+            last_result = res
+            continue
+
+        if name == 'wa_bot_pair':
+            from . import wa_bot
+            res = wa_bot.action_pair(username_lower, params)
+            last_result = res
+            continue
+
+        if name == 'wa_bot_status':
+            from . import wa_bot
+            res = wa_bot.action_status(username_lower)
+            last_result = res
+            continue
+
         if name == 'wa_bot_update':
             from . import wa_bot
             res = wa_bot.apply_structured_update(username_lower, params)
             last_result = res
-            if not res.get('success'):
-                return res, generated_images, created_paths
+            continue
+
+        if name == 'wa_bot_wake':
+            from . import wa_bot
+            res = wa_bot.action_wake(username_lower)
+            last_result = res
+            continue
+
+        if name == 'wa_bot_stop':
+            from . import wa_bot
+            res = wa_bot.action_stop(username_lower, params)
+            last_result = res
+            continue
+
+        if name == 'wa_bot_cancel_setup':
+            from . import wa_bot
+            res = wa_bot.action_cancel_setup(username_lower)
+            last_result = res
             continue
 
         if name == 'generate_image':

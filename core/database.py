@@ -137,7 +137,8 @@ def _connect() -> sqlite3.Connection:
             ver INTEGER NOT NULL DEFAULT 0,
             quota_json TEXT NOT NULL,
             sessions_json TEXT NOT NULL,
-            wa_bot_json TEXT NOT NULL DEFAULT '{}'
+            wa_bot_json TEXT NOT NULL DEFAULT '{}',
+            chats_json TEXT NOT NULL DEFAULT '[]'
         )
         """
     )
@@ -147,6 +148,10 @@ def _connect() -> sqlite3.Connection:
         pass
     try:
         conn.execute("ALTER TABLE users ADD COLUMN wa_bot_json TEXT NOT NULL DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN chats_json TEXT NOT NULL DEFAULT '[]'")
     except sqlite3.OperationalError:
         pass
     conn.execute(
@@ -171,6 +176,11 @@ def _row_to_dict(row) -> dict:
         wa_bot = json.loads(raw_wa) if isinstance(raw_wa, str) else {}
     except Exception:
         wa_bot = {}
+    raw_chats = row["chats_json"] if ("chats_json" in keys and row["chats_json"]) else "[]"
+    try:
+        chats = json.loads(raw_chats) if isinstance(raw_chats, str) else []
+    except Exception:
+        chats = []
     return {
         "username": row["username"],
         "username_lower": row["username_lower"],
@@ -181,14 +191,15 @@ def _row_to_dict(row) -> dict:
         "quota": json.loads(row["quota_json"] or "{}"),
         "sessions": json.loads(row["sessions_json"] or "[]"),
         "wa_bot": wa_bot if isinstance(wa_bot, dict) else {},
+        "chats": chats if isinstance(chats, list) else [],
     }
 
 
 def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
     conn.execute(
         """
-        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json, wa_bot_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (username, username_lower, password_hash, created_at, updated_at, ver, quota_json, sessions_json, wa_bot_json, chats_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(username_lower) DO UPDATE SET
             username=excluded.username,
             password_hash=excluded.password_hash,
@@ -196,7 +207,8 @@ def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
             ver=excluded.ver,
             quota_json=excluded.quota_json,
             sessions_json=excluded.sessions_json,
-            wa_bot_json=excluded.wa_bot_json
+            wa_bot_json=excluded.wa_bot_json,
+            chats_json=excluded.chats_json
         """,
         (
             rec["username"],
@@ -208,6 +220,7 @@ def _upsert_sqlite(conn: sqlite3.Connection, rec: dict) -> None:
             json.dumps(rec.get("quota") or {}, ensure_ascii=False),
             json.dumps(rec.get("sessions") or [], ensure_ascii=False),
             json.dumps(rec.get("wa_bot") or {}, ensure_ascii=False),
+            json.dumps(rec.get("chats") or [], ensure_ascii=False),
         ),
     )
     conn.commit()
@@ -232,6 +245,10 @@ def _initial_quota(now: float) -> dict:
         "ai": {"day": {"start": now, "count": 0}},
         "image": {
             "month": {"month": _current_month_key(now), "start": now, "count": 0},
+        },
+        "wa_bot": {
+            "limit": cfg.WA_BOT_QUOTA_LIMIT,
+            "used": 0,
         },
     }
 
@@ -319,6 +336,7 @@ def create_user(username: str, password_hash: str, initial_sessions=None):
             "quota": _initial_quota(now),
             "sessions": list(initial_sessions or []),
             "wa_bot": {},
+            "chats": [],
         }
 
         if _blob_sync_enabled():
@@ -485,15 +503,79 @@ def _image_status_from_quota(quota_obj: dict) -> dict:
     }
 
 
+def _wa_bot_status_from_quota(quota_obj: dict, wa_bot_state: dict = None) -> dict:
+    wb_q = quota_obj.setdefault("wa_bot", {})
+    if not isinstance(wb_q, dict):
+        wb_q = {}
+        quota_obj["wa_bot"] = wb_q
+    limit = max(1, int(wb_q.get("limit") or cfg.WA_BOT_QUOTA_LIMIT))
+    used = max(0, int(wb_q.get("used", 0) or 0))
+    remaining = max(0, limit - used)
+    wb_s = wa_bot_state if isinstance(wa_bot_state, dict) else {}
+    active = bool(wb_s.get("stage") == "active" or wb_s.get("connected"))
+    return {
+        "limit": limit,
+        "used": used,
+        "remaining": remaining,
+        "active": active,
+        "setup_free": True,
+    }
+
+
 def user_quota_snapshot(user_record: dict) -> dict:
     """Kullanici kaydindan guncel kota ozeti uretir."""
     q = dict(user_record.get("quota") or _initial_quota(time.time()))
     return {
         "ai": _ai_status_from_quota(q),
         "image": _image_status_from_quota(q),
+        "wa_bot": _wa_bot_status_from_quota(q, user_record.get("wa_bot")),
         "account_bound": True,
         "username": user_record.get("username"),
     }
+
+
+def check_user_wa_quota(username_lower: str, amount: int = 1):
+    """WhatsApp bot hizmeti (toplam 10 hak) kotasini harcamadan kontrol eder."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False, {
+                "limit": cfg.WA_BOT_QUOTA_LIMIT,
+                "used": cfg.WA_BOT_QUOTA_LIMIT,
+                "remaining": 0,
+                "active": False,
+                "setup_free": True,
+            }
+        q = rec.setdefault("quota", _initial_quota(time.time()))
+        status = _wa_bot_status_from_quota(q, rec.get("wa_bot"))
+        return (status["used"] + int(amount) <= status["limit"]), status
+
+
+def consume_user_wa_quota(username_lower: str, amount: int = 1):
+    """WhatsApp bot hizmeti (toplam 10 hak) kotasindan dusum yapar (AI/gorsel hakkina dokunmaz)."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False, {
+                "limit": cfg.WA_BOT_QUOTA_LIMIT,
+                "used": cfg.WA_BOT_QUOTA_LIMIT,
+                "remaining": 0,
+                "active": False,
+                "setup_free": True,
+            }
+        q = rec.setdefault("quota", _initial_quota(time.time()))
+        wb_q = q.setdefault("wa_bot", {"limit": cfg.WA_BOT_QUOTA_LIMIT, "used": 0})
+        if not isinstance(wb_q, dict):
+            wb_q = {"limit": cfg.WA_BOT_QUOTA_LIMIT, "used": 0}
+            q["wa_bot"] = wb_q
+        limit = max(1, int(wb_q.get("limit") or cfg.WA_BOT_QUOTA_LIMIT))
+        used = max(0, int(wb_q.get("used", 0) or 0))
+        if used + int(amount) > limit:
+            return False, _wa_bot_status_from_quota(q, rec.get("wa_bot"))
+        wb_q["limit"] = limit
+        wb_q["used"] = used + int(amount)
+        save_user_record(rec)
+        return True, _wa_bot_status_from_quota(q, rec.get("wa_bot"))
 
 
 def check_user_ai_quota(username_lower: str, amount: int = 1):
@@ -638,3 +720,340 @@ def save_user_wa_bot(username_lower: str, wa_bot: dict) -> bool:
             return False
         rec["wa_bot"] = dict(wa_bot) if isinstance(wa_bot, dict) else {}
         return save_user_record(rec)
+
+
+# ------------------------------------------------------------------ 30 Gunluk Sohbet Gecmisi & Maks. 2 Sabitleme
+import re as _re
+
+
+def _clean_chat_id(chat_id: str) -> str:
+    raw = str(chat_id or "").strip()
+    cleaned = _re.sub(r"[^a-zA-Z0-9_-]", "", raw)[:48]
+    return cleaned
+
+
+def _derive_chat_title(title: str, messages: list) -> str:
+    t = str(title or "").strip()
+    if not t:
+        for m in (messages or []):
+            if isinstance(m, dict) and m.get("role") == "user" and str(m.get("text") or "").strip():
+                t = str(m["text"]).strip()
+                break
+    t = " ".join(t.split())[:72]
+    return t or "Yeni Sohbet"
+
+
+def _normalize_chat_messages(messages) -> list:
+    if not isinstance(messages, list):
+        return []
+    out = []
+    max_msgs = int(getattr(cfg, "MAX_CHAT_MESSAGES", 60))
+    for m in messages[-max_msgs:]:
+        if not isinstance(m, dict):
+            continue
+        raw_role = str(m.get("role") or "user").strip().lower()
+        role = "model" if raw_role in ("model", "assistant", "bot") else "user"
+        text = str(m.get("text") or m.get("content") or "").strip()
+        if not text:
+            continue
+        try:
+            ts = float(m.get("ts") or time.time())
+        except (TypeError, ValueError):
+            ts = time.time()
+        out.append({"role": role, "text": text[:6000], "ts": ts})
+    return out[-max_msgs:]
+
+
+def _prune_and_normalize_chats(raw_chats, now: float = None):
+    """
+    Suresi dolan (30 gun) sabitsiz sohbetleri otomatik temizler.
+    Sabitlenen ('Silinmesin / Sabitle') sohbetler (maks. 2) korunur.
+    Veriler yalnizca kullanicinin sohbete devam etmesi icindir (egitim disi).
+
+    Returns: (temiz_liste, degisiklik_oldu_mu)
+    """
+    ts_now = float(now if now is not None else time.time())
+    retention_secs = int(getattr(cfg, "CHAT_HISTORY_RETENTION_DAYS", 30)) * DAY
+    max_pinned = int(getattr(cfg, "MAX_PINNED_CHATS", 2))
+    max_saved = int(getattr(cfg, "MAX_SAVED_CHATS", 40))
+
+    if not isinstance(raw_chats, list):
+        return [], bool(raw_chats)
+
+    seen_ids = set()
+    kept = []
+    changed = False
+
+    for entry in raw_chats:
+        if not isinstance(entry, dict):
+            changed = True
+            continue
+        cid = _clean_chat_id(entry.get("id"))
+        if not cid or cid in seen_ids:
+            changed = True
+            continue
+        seen_ids.add(cid)
+
+        try:
+            created_at = float(entry.get("created_at") or ts_now)
+        except (TypeError, ValueError):
+            created_at = ts_now
+        try:
+            updated_at = float(entry.get("updated_at") or created_at)
+        except (TypeError, ValueError):
+            updated_at = created_at
+
+        pinned = bool(entry.get("pinned"))
+        if not pinned and (ts_now - updated_at) > retention_secs:
+            changed = True
+            continue
+
+        msgs = _normalize_chat_messages(entry.get("messages"))
+        title = _derive_chat_title(entry.get("title", ""), msgs)
+        expires_at = None if pinned else (updated_at + retention_secs)
+
+        norm = {
+            "id": cid,
+            "title": title,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "pinned": pinned,
+            "expires_at": expires_at,
+            "purpose": "user_continuation_only",
+            "messages": msgs,
+        }
+        kept.append(norm)
+
+    # Maksimum 2 sabitleme siniri guvencesi (asiri varsa en eski sabiti coz)
+    pinned_items = [c for c in kept if c["pinned"]]
+    if len(pinned_items) > max_pinned:
+        pinned_items.sort(key=lambda c: c["updated_at"], reverse=True)
+        for extra in pinned_items[max_pinned:]:
+            extra["pinned"] = False
+            extra["expires_at"] = extra["updated_at"] + retention_secs
+            changed = True
+
+    kept.sort(key=lambda c: (1 if c["pinned"] else 0, c["updated_at"]), reverse=True)
+    if len(kept) > max_saved:
+        pinned_list = [c for c in kept if c["pinned"]]
+        unpinned_list = [c for c in kept if not c["pinned"]]
+        keep_unpinned = max(0, max_saved - len(pinned_list))
+        if len(unpinned_list) > keep_unpinned:
+            changed = True
+        kept = pinned_list + unpinned_list[:keep_unpinned]
+
+    if len(kept) != len(raw_chats):
+        changed = True
+
+    return kept, changed
+
+
+def _chat_summary_item(chat_obj: dict) -> dict:
+    msgs = chat_obj.get("messages") or []
+    preview = ""
+    for m in reversed(msgs):
+        if isinstance(m, dict) and m.get("text"):
+            preview = " ".join(str(m["text"]).split())[:96]
+            break
+    return {
+        "id": chat_obj["id"],
+        "title": chat_obj["title"],
+        "created_at": chat_obj["created_at"],
+        "updated_at": chat_obj["updated_at"],
+        "pinned": bool(chat_obj.get("pinned")),
+        "expires_at": chat_obj.get("expires_at"),
+        "message_count": len(msgs),
+        "preview": preview,
+        "purpose": "user_continuation_only",
+    }
+
+
+def _chat_list_payload(chats: list) -> dict:
+    pinned_count = sum(1 for c in chats if c.get("pinned"))
+    return {
+        "chats": [_chat_summary_item(c) for c in chats],
+        "pinned_count": pinned_count,
+        "max_pinned": int(getattr(cfg, "MAX_PINNED_CHATS", 2)),
+        "retention_days": int(getattr(cfg, "CHAT_HISTORY_RETENTION_DAYS", 30)),
+        "continuation_only": True,
+    }
+
+
+def list_user_chats(username_lower: str, now: float = None) -> dict:
+    """Kullanicinin 30 gunluk sohbet gecmisini dondurur (suresi dolan sabitsizleri temizler)."""
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return _chat_list_payload([])
+        chats, changed = _prune_and_normalize_chats(rec.get("chats") or [], now=now)
+        if changed:
+            rec["chats"] = chats
+            save_user_record(rec)
+        return _chat_list_payload(chats)
+
+
+def get_user_chat(username_lower: str, chat_id: str, now: float = None):
+    """Belirli bir sohbeti tum mesajlariyla getirir."""
+    cid = _clean_chat_id(chat_id)
+    if not cid:
+        return None
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return None
+        chats, changed = _prune_and_normalize_chats(rec.get("chats") or [], now=now)
+        if changed:
+            rec["chats"] = chats
+            save_user_record(rec)
+        for c in chats:
+            if c["id"] == cid:
+                return c
+        return None
+
+
+def upsert_user_chat_turn(username_lower: str, chat_id: str, user_text: str, bot_text: str,
+                          title: str = "", now: float = None) -> dict:
+    """Mesaj ve yanit turunu kullanicinin 30 gunluk devam edilebilir sohbet gecmisine kaydeder."""
+    ts_now = float(now if now is not None else time.time())
+    retention_secs = int(getattr(cfg, "CHAT_HISTORY_RETENTION_DAYS", 30)) * DAY
+    cid = _clean_chat_id(chat_id)
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return {"chat": None, **_chat_list_payload([])}
+        chats, _ = _prune_and_normalize_chats(rec.get("chats") or [], now=ts_now)
+        target = None
+        if cid:
+            for c in chats:
+                if c["id"] == cid:
+                    target = c
+                    break
+        if target is None:
+            if not cid:
+                cid = "c_" + os.urandom(6).hex()
+            target = {
+                "id": cid,
+                "title": _derive_chat_title(title, [{"role": "user", "text": user_text}]),
+                "created_at": ts_now,
+                "updated_at": ts_now,
+                "pinned": False,
+                "expires_at": ts_now + retention_secs,
+                "purpose": "user_continuation_only",
+                "messages": [],
+            }
+            chats.insert(0, target)
+
+        msgs = list(target.get("messages") or [])
+        if str(user_text or "").strip():
+            msgs.append({"role": "user", "text": str(user_text).strip()[:6000], "ts": ts_now})
+        if str(bot_text or "").strip():
+            msgs.append({"role": "model", "text": str(bot_text).strip()[:6000], "ts": ts_now})
+        target["messages"] = _normalize_chat_messages(msgs)
+        target["title"] = _derive_chat_title(title or target.get("title", ""), target["messages"])
+        target["updated_at"] = ts_now
+        target["expires_at"] = None if target.get("pinned") else (ts_now + retention_secs)
+
+        chats, _ = _prune_and_normalize_chats(chats, now=ts_now)
+        rec["chats"] = chats
+        save_user_record(rec)
+        saved_target = next((c for c in chats if c["id"] == cid), target)
+        return {"chat": saved_target, **_chat_list_payload(chats)}
+
+
+def create_or_save_user_chat(username_lower: str, chat_id: str = "", title: str = "",
+                             messages: list = None, now: float = None) -> dict:
+    """Yeni bir sohbet olusturur veya mevcut sohbetin mesajlarini/basligini gunceller."""
+    ts_now = float(now if now is not None else time.time())
+    retention_secs = int(getattr(cfg, "CHAT_HISTORY_RETENTION_DAYS", 30)) * DAY
+    cid = _clean_chat_id(chat_id)
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return {"chat": None, **_chat_list_payload([])}
+        chats, _ = _prune_and_normalize_chats(rec.get("chats") or [], now=ts_now)
+        target = next((c for c in chats if cid and c["id"] == cid), None)
+        norm_msgs = _normalize_chat_messages(messages) if isinstance(messages, list) else None
+        if target is None:
+            if not cid:
+                cid = "c_" + os.urandom(6).hex()
+            m_list = norm_msgs if norm_msgs is not None else []
+            target = {
+                "id": cid,
+                "title": _derive_chat_title(title, m_list),
+                "created_at": ts_now,
+                "updated_at": ts_now,
+                "pinned": False,
+                "expires_at": ts_now + retention_secs,
+                "purpose": "user_continuation_only",
+                "messages": m_list,
+            }
+            chats.insert(0, target)
+        else:
+            if norm_msgs is not None:
+                target["messages"] = norm_msgs
+            target["title"] = _derive_chat_title(title or target.get("title", ""), target["messages"])
+            target["updated_at"] = ts_now
+            target["expires_at"] = None if target.get("pinned") else (ts_now + retention_secs)
+
+        chats, _ = _prune_and_normalize_chats(chats, now=ts_now)
+        rec["chats"] = chats
+        save_user_record(rec)
+        saved_target = next((c for c in chats if c["id"] == cid), target)
+        return {"chat": saved_target, **_chat_list_payload(chats)}
+
+
+def set_user_chat_pinned(username_lower: str, chat_id: str, pinned: bool, now: float = None):
+    """
+    Sohbeti 'Silinmesin / Sabitle' olarak isaretler veya kilidini kaldirir.
+    Kullanici basina EN FAZLA 2 sohbet sabitlenebilir (3. istek 409 dondurur).
+    """
+    cid = _clean_chat_id(chat_id)
+    if not cid:
+        return False, "Geçersiz sohbet kimliği.", 400
+    ts_now = float(now if now is not None else time.time())
+    retention_secs = int(getattr(cfg, "CHAT_HISTORY_RETENTION_DAYS", 30)) * DAY
+    max_pinned = int(getattr(cfg, "MAX_PINNED_CHATS", 2))
+
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False, "Kullanıcı bulunamadı.", 404
+        chats, _ = _prune_and_normalize_chats(rec.get("chats") or [], now=ts_now)
+        target = next((c for c in chats if c["id"] == cid), None)
+        if not target:
+            return False, "Sohbet bulunamadı.", 404
+
+        want_pin = bool(pinned)
+        if want_pin:
+            other_pinned = sum(1 for c in chats if c.get("pinned") and c["id"] != cid)
+            if other_pinned >= max_pinned:
+                return False, (
+                    "En fazla %d sohbeti 'Silinmesin / Sabitle' olarak koruyabilirsiniz. "
+                    "Yeni bir sohbeti sabitlemek için önce sabitlenmiş sohbetlerden birinin kilidini kaldırın."
+                    % max_pinned
+                ), 409
+
+        target["pinned"] = want_pin
+        target["expires_at"] = None if want_pin else (float(target.get("updated_at") or ts_now) + retention_secs)
+        chats, _ = _prune_and_normalize_chats(chats, now=ts_now)
+        rec["chats"] = chats
+        save_user_record(rec)
+        return True, {"chat": _chat_summary_item(target), **_chat_list_payload(chats)}, 200
+
+
+def delete_user_chat(username_lower: str, chat_id: str, now: float = None):
+    """Belirtilen sohbeti kullanici gecmisinden kalici olarak siler."""
+    cid = _clean_chat_id(chat_id)
+    if not cid:
+        return False, {"error": "Geçersiz sohbet kimliği."}
+    with _DB_LOCK:
+        rec = get_user_by_username(username_lower)
+        if not rec:
+            return False, {"error": "Kullanıcı bulunamadı."}
+        chats, _ = _prune_and_normalize_chats(rec.get("chats") or [], now=now)
+        new_chats = [c for c in chats if c["id"] != cid]
+        if len(new_chats) == len(chats):
+            return False, {"error": "Sohbet bulunamadı."}
+        rec["chats"] = new_chats
+        save_user_record(rec)
+        return True, _chat_list_payload(new_chats)

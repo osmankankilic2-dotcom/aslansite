@@ -730,17 +730,22 @@ async function callCustomAi(aiCfg, userText, cfg) {
 
     try {
         if (provider === 'gemini') {
-            const model = aiCfg.model || 'gemini-2.5-flash';
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-            const res = await ipv4PostJson(url, {
-                contents: [{ role: 'user', parts: [{ text: userText }] }],
-                systemInstruction: { parts: [{ text: sysPrompt }] },
-                generationConfig: { temperature: 0.7, maxOutputTokens: 600 },
-            }, { 'x-goog-api-key': apiKey }, 25000);
-            const cand = res.data && res.data.candidates && res.data.candidates[0];
-            const parts = cand && cand.content && cand.content.parts;
-            if (Array.isArray(parts)) {
-                return parts.map((p) => p.text || '').join('').trim();
+            const modelsToTry = Array.from(new Set([aiCfg.model || 'gemini-4-hydrogen', 'gemini-3.5-flash-lite']));
+            for (const model of modelsToTry) {
+                try {
+                    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+                    const res = await ipv4PostJson(url, {
+                        contents: [{ role: 'user', parts: [{ text: userText }] }],
+                        systemInstruction: { parts: [{ text: sysPrompt }] },
+                        generationConfig: { temperature: 0.7, maxOutputTokens: 600 },
+                    }, { 'x-goog-api-key': apiKey }, 25000);
+                    const cand = res.data && res.data.candidates && res.data.candidates[0];
+                    const parts = cand && cand.content && cand.content.parts;
+                    if (Array.isArray(parts)) {
+                        const out = parts.map((p) => p.text || '').join('').trim();
+                        if (out) return out;
+                    }
+                } catch (_) {}
             }
             return '';
         }
@@ -1865,12 +1870,18 @@ async function runAutoWakeCycle(options = {}) {
             await sleep(sleepMs);
             const latest = await loadWakeLease();
             if (!latest || !latest.activeToken || latest.activeToken === nextToken) {
-                await ipv4PostJson(
-                    resolveSelfWakeUrl(),
-                    { chain_token: nextToken, hop: hop + 1 },
-                    { 'X-Worker-Token': resolveBridgeToken() },
-                    10000,
-                ).catch(() => {});
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const wakeRes = await ipv4PostJson(
+                            resolveSelfWakeUrl(),
+                            { chain_token: nextToken, hop: hop + 1 },
+                            { 'X-Worker-Token': resolveBridgeToken() },
+                            10000,
+                        );
+                        if (wakeRes && wakeRes.status >= 200 && wakeRes.status < 500) break;
+                    } catch (_) {}
+                    if (attempt === 0) await sleep(2000);
+                }
             }
         }
     }

@@ -70,6 +70,11 @@ function bindUiEvents() {
             case 'send-ai': sendAI(); break;
             case 'open-image-studio': openImageStudio(); break;
             case 'toggle-subpanel': toggleSubPanel(actEl.getAttribute('data-target')); break;
+            case 'toggle-history': toggleChatHistoryDrawer(); break;
+            case 'new-chat': startNewChat(); break;
+            case 'open-chat': openSavedChat(actEl.getAttribute('data-chat-id') || ''); break;
+            case 'toggle-pin-chat': togglePinChat(actEl.getAttribute('data-chat-id') || '', actEl.getAttribute('data-pinned') !== '1'); break;
+            case 'delete-chat': deleteSavedChat(actEl.getAttribute('data-chat-id') || ''); break;
             case 'clear-chat': clearChat(); break;
             case 'clear-session-media': clearSessionMedia(); break;
             case 'ai-command': runAICommand(actEl.getAttribute('data-cmd') || ''); break;
@@ -117,6 +122,9 @@ function bindUiEvents() {
                 sendAI();
             }
         });
+        $('ai-input').addEventListener('input', function () {
+            if (typeof autoResizeAiInput === 'function') autoResizeAiInput();
+        });
     }
 
     if ($('ai-file')) {
@@ -135,6 +143,7 @@ async function initApp() {
                 if (me.authenticated && me.user) {
                     saveStoredAuth(me.user, state.authToken);
                     if (me.quota) applyQuotaSnapshot(me.quota);
+                    if (typeof loadSavedChats === 'function') loadSavedChats();
                 } else {
                     saveStoredAuth(null, '');
                 }
@@ -174,7 +183,7 @@ function initSilentKeepAlive() {
     function sendSilentPing() {
         lastPingAt = Date.now();
         try {
-            fetch('/api/ping', {
+            fetch('/api/whatsapp/keep-alive', {
                 method: 'GET',
                 cache: 'no-store',
                 credentials: 'omit',

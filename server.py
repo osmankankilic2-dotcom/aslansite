@@ -304,7 +304,7 @@ def tts():
 
         audio, engine_name = ai_engine.synthesize_speech(text, voice, rate=rate, pitch=pitch)
         if not audio:
-            return _error('Ses uretilemedi. Lutfen daha sonra tekrar deneyin.', 503)
+            return jsonify({'error': 'Ses uretilemedi. Lutfen daha sonra tekrar deneyin.', 'fallback_speech': True}), 503
 
         response = send_file(io_bytes(audio), mimetype='audio/mpeg',
                              as_attachment=False, download_name='speech.mp3')
@@ -377,6 +377,7 @@ def ai():
             }), 401
 
         message = ''
+        chat_id = ''
         files = []
         available_files = []
         context_metas = []
@@ -384,6 +385,7 @@ def ai():
 
         if request.content_type and 'multipart/form-data' in request.content_type:
             message = (request.form.get('message', '') or '').strip()
+            chat_id = (request.form.get('chat_id', '') or '').strip()
             files = request.files.getlist('files')
             try:
                 available_files = json.loads(request.form.get('available_files', '[]'))
@@ -398,6 +400,7 @@ def ai():
             if not isinstance(data, dict):
                 return _error('Gecersiz istek govdesi', 400)
             message = str(data.get('message', '') or '').strip()
+            chat_id = str(data.get('chat_id', '') or '').strip()
             available_files = data.get('available_files')
             if available_files is None:
                 available_files = []
@@ -438,10 +441,12 @@ def ai():
         if not message and not files:
             return _error('Mesaj veya dosya bos', 400)
 
-        # ---- Hesaba bagli DB kota kontrolu ve WhatsApp bot tek-hak akisi ----
+        # ---- Hesaba bagli DB kota kontrolu: kurulum ucretsiz, kurulum sonrasi WA bot 10 hak ----
         uname_lower = user['username_lower']
-        wa_kind, needs_credit = wa_bot.should_consume_credit(uname_lower, message)
-        if needs_credit:
+        credit_mode, credit_bucket = wa_bot.classify_credit_policy(uname_lower, message)
+        usage = database.user_quota_snapshot(user)['ai']
+
+        if credit_bucket == 'ai':
             allowed, usage = database.check_user_ai_quota(uname_lower)
             if not allowed:
                 snap = database.user_quota_snapshot(user)
@@ -460,25 +465,30 @@ def ai():
                     % ip_usage.get('reset_in', 60),
                     429,
                 )
-
-        if wa_kind is not None:
-            def _charge_once():
-                if needs_credit:
-                    database.consume_user_ai_quota(uname_lower)
-            handled, wa_reply, wa_event, _ = wa_bot.handle_chat_turn(
-                uname_lower, message, consume_credit_fn=_charge_once)
-            if handled:
-                fresh_user = database.get_user_by_username(uname_lower) or user
-                snap = database.user_quota_snapshot(fresh_user)
+        elif credit_bucket == 'wa_bot':
+            wa_allowed, wa_usage = database.check_user_wa_quota(uname_lower)
+            if not wa_allowed:
+                snap = database.user_quota_snapshot(user)
                 return jsonify({
-                    'reply': wa_reply,
+                    'error': ('WhatsApp bot hizmeti için tanımlı %d kullanım hakkınız doldu.'
+                              % wa_usage.get('limit', cfg.WA_BOT_QUOTA_LIMIT)),
                     'remaining': snap['ai']['remaining'],
                     'quota': snap,
-                    'media_result': None,
-                    'image_result': None,
-                    'generated_images': [],
-                    'wa_event': wa_event,
-                })
+                }), 429
+
+            ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                get_client_ip(), 'wa', cfg.IP_WA_HOURLY_LIMIT, 3600)
+            if not ip_ok:
+                return _error(
+                    'Saatlik bot istek sinirina ulasildi. %d saniye sonra tekrar deneyin.'
+                    % ip_usage.get('reset_in', 60),
+                    429,
+                )
+
+        wa_state_cur = database.get_user_wa_bot(uname_lower)
+        extra_ctx = ''
+        if credit_bucket in ('free', 'wa_bot') or wa_bot.is_wa_related_message(message, wa_state_cur):
+            extra_ctx = wa_bot.build_ai_context(uname_lower, message)
 
         parts = []
         for file in files:
@@ -508,16 +518,13 @@ def ai():
         all_available = available_files + context_metas
         reply, error = ai_engine.generate_reply(
             message, parts=parts, available_files=all_available,
-            api_key=get_gemini_api_key(), history=history)
+            api_key=get_gemini_api_key(), history=history, extra_context=extra_ctx)
         if not reply:
             return _error(
                 api_utils.safe_error_message(error, 'Yanit alinamadi'),
                 502,
                 remaining=usage['remaining'],
             )
-
-        # Yalnizca basarili yanit sonrasi hesaptan 1 hak dusulur
-        _, usage = database.consume_user_ai_quota(uname_lower)
 
         media_result = None
         image_result = None
@@ -528,7 +535,11 @@ def ai():
             clean_reply = ai_engine.strip_action(reply)
             media_result, generated_images, pipe_paths = ai_engine.run_action_pipeline(
                 action, uploaded_files=all_available, username_lower=uname_lower)
-            if isinstance(media_result, dict):
+            wa_handled, media_result, reply, wa_event = wa_bot.process_action_outcome(
+                media_result, clean_reply, reply)
+            if wa_handled:
+                created_outputs.extend(pipe_paths)
+            elif isinstance(media_result, dict):
                 keep_final = (
                     not media_result.get('data_url')
                     and str(media_result.get('download_url', '')).startswith('/api/media/download/')
@@ -538,22 +549,30 @@ def ai():
                 created_outputs.extend([p for p in pipe_paths if os.path.basename(p) != keep_base])
                 if media_result.get('operation') == 'generate_image' and media_result.get('success'):
                     image_result = media_result
-                elif media_result.get('operation') == 'wa_bot_update' and media_result.get('success'):
-                    wa_event = {'type': 'config_updated', 'config_summary': media_result.get('config_summary', {})}
-                    media_result = None
                 if media_result and media_result.get('success'):
                     reply = clean_reply or 'Islem tamamlandi.'
-                elif wa_event:
-                    reply = clean_reply or 'WhatsApp bot ayarları güncellendi.'
             else:
                 created_outputs.extend(pipe_paths)
+
+        reply = wa_bot.scrub_sensitive_reply(reply)
+
+        if credit_bucket == 'ai':
+            _, usage = database.consume_user_ai_quota(uname_lower)
+        elif credit_bucket == 'wa_bot':
+            database.consume_user_wa_quota(uname_lower)
+
+        chat_saved = database.upsert_user_chat_turn(
+            uname_lower, chat_id, message or '(dosya gönderildi)', reply)
+        saved_chat = chat_saved.get('chat') or {}
 
         fresh_user = database.get_user_by_username(uname_lower) or user
         snap = database.user_quota_snapshot(fresh_user)
         return jsonify({
             'reply': reply,
-            'remaining': usage['remaining'],
+            'remaining': snap['ai']['remaining'],
             'quota': snap,
+            'chat_id': saved_chat.get('id') or chat_id,
+            'chat_title': saved_chat.get('title') or '',
             'media_result': media_result,
             'image_result': image_result,
             'generated_images': generated_images,
@@ -637,6 +656,13 @@ def quota_status():
                 'monthly_used': 0,
                 'monthly_remaining': cfg.IMAGE_MONTHLY_LIMIT,
                 'allowed': True,
+            },
+            'wa_bot': {
+                'limit': cfg.WA_BOT_QUOTA_LIMIT,
+                'used': 0,
+                'remaining': cfg.WA_BOT_QUOTA_LIMIT,
+                'active': False,
+                'setup_free': True,
             },
         })
     except Exception as e:
@@ -983,6 +1009,69 @@ def wa_wake():
         data = request.get_json(force=True, silent=True) or {}
         res = wa_bot.wake_user_bot(user['username_lower'], force=bool(data.get('force', True)))
         return jsonify(res), (200 if res.get('success') else 502)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/chats', methods=['GET', 'POST'])
+def chats_collection():
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Sohbet geçmişi için giriş yapmalısınız.', 'auth_required': True}), 401
+        uname_lower = user['username_lower']
+        if request.method == 'GET':
+            return jsonify(database.list_user_chats(uname_lower))
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
+        res = database.create_or_save_user_chat(
+            uname_lower,
+            chat_id=data.get('chat_id') or data.get('id') or '',
+            title=data.get('title') or '',
+            messages=data.get('messages') if isinstance(data.get('messages'), list) else None,
+        )
+        return jsonify(res)
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/chats/pin', methods=['POST'])
+@app.route('/api/chats/<chat_id>/pin', methods=['POST'])
+def chats_pin(chat_id=''):
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Sohbet sabitlemek için giriş yapmalısınız.', 'auth_required': True}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        if not isinstance(data, dict):
+            return _error('Gecersiz istek govdesi', 400)
+        cid = chat_id or data.get('chat_id') or data.get('id') or ''
+        ok, res_or_err, status = database.set_user_chat_pinned(
+            user['username_lower'], cid, bool(data.get('pinned')))
+        payload = res_or_err if isinstance(res_or_err, dict) else {'error': res_or_err}
+        return jsonify(payload), status
+    except Exception as e:
+        return _error(api_utils.safe_error_message(e), 500)
+
+
+@app.route('/api/chats/delete', methods=['POST'])
+@app.route('/api/chats/<chat_id>', methods=['GET', 'DELETE'])
+def chats_item(chat_id=''):
+    try:
+        user, _ = auth.authenticate_request(request.headers)
+        if not user:
+            return jsonify({'error': 'Sohbet geçmişi için giriş yapmalısınız.', 'auth_required': True}), 401
+        uname_lower = user['username_lower']
+        if request.method == 'GET':
+            chat_obj = database.get_user_chat(uname_lower, chat_id)
+            if not chat_obj:
+                return _error('Sohbet bulunamadı.', 404)
+            return jsonify({'chat': chat_obj})
+        data = request.get_json(force=True, silent=True) or {}
+        cid = chat_id or (data.get('chat_id') if isinstance(data, dict) else '') or (data.get('id') if isinstance(data, dict) else '')
+        ok, res = database.delete_user_chat(uname_lower, cid)
+        return jsonify(res), (200 if ok else 404)
     except Exception as e:
         return _error(api_utils.safe_error_message(e), 500)
 

@@ -29,6 +29,13 @@ def _unauth_snapshot() -> dict:
             'monthly_remaining': cfg.IMAGE_MONTHLY_LIMIT,
             'allowed': True,
         },
+        'wa_bot': {
+            'limit': cfg.WA_BOT_QUOTA_LIMIT,
+            'used': 0,
+            'remaining': cfg.WA_BOT_QUOTA_LIMIT,
+            'active': False,
+            'setup_free': True,
+        },
     }
 
 

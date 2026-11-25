@@ -14,13 +14,14 @@ import urllib.request
 
 from . import api_utils, config as cfg, database
 
-_ACTIVE_STAGES = frozenset({
+_SETUP_STAGES = frozenset({
     'awaiting_risk_consent',
     'awaiting_phone',
     'awaiting_phone_consent',
     'awaiting_code_confirm',
     'pairing',
     'connected_wait_ack',
+    'customizing',
     'custom_triggers',
     'custom_groups',
     'custom_human',
@@ -28,6 +29,274 @@ _ACTIVE_STAGES = frozenset({
     'custom_ai_choice',
     'custom_ai_key',
 })
+
+def _has_active_bot(wa_state: dict) -> bool:
+    st = _normalize_wa_state(wa_state)
+    return st.get('stage') == 'active' or (bool(st.get('connected')) and bool(st.get('connected_ack')) and st.get('stage') == 'active')
+
+
+def is_wa_related_message(message: str, wa_state: dict = None) -> bool:
+    """Mesajin WhatsApp bot kurulumu, eslestirmesi veya yonetimiyle ilgili olup olmadigini belirler."""
+    st = _normalize_wa_state(wa_state)
+    low = _tr_lower(message)
+    if not low:
+        return False
+    if 'whatsapp' in low or re.search(r'\bwp\b', low) is not None:
+        return True
+    if is_in_active_setup(st):
+        return True
+    if st.get('connected') or st.get('stage') in ('pairing', 'connected_wait_ack', 'customizing', 'active'):
+        bot_refs = (
+            'bot', 'gruplar', 'grupta', 'özel mesaj', 'ozel mesaj',
+            'yazıyor', 'yaziyor', 'tetikleyici', 'üslup', 'uslup',
+            'cevap vermesin', 'yanıt versin', 'yanit versin', 'eşleştir', 'eslestir',
+            'kod', 'oturum', 'uyan', 'durum', 'durdur', 'kapat', 'başlat', 'baslat',
+        )
+        if any(k in low for k in bot_refs):
+            return True
+    return False
+
+
+def classify_credit_policy(username_lower: str, message: str) -> tuple:
+    """
+    Guncel Hak / Kota Kuralini uygular:
+      - Kurulum ve yapilandirma adimlari (risk onayi, numara, 8 haneli kod, ilk ozellestirme):
+        kullanicinin standart AI hakkindan DUSULMEZ -> ('wa_setup_free', 'free')
+      - Kurulum bittikten sonra WhatsApp bot hizmeti yonetimi:
+        ayri 10 haklik WA bot kotasindan kullanilir -> ('wa_service', 'wa_bot')
+      - Normal sohbet / medya / gorsel istekleri:
+        standart gunluk AI kotasiyla devam eder -> ('standard', 'ai')
+    """
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    low = _tr_lower(message)
+    has_wa_kw = ('whatsapp' in low or re.search(r'\bwp\b', low) is not None)
+    setup_active = is_in_active_setup(wa_state) or (wa_state.get('stage') in _SETUP_STAGES)
+
+    if _has_active_bot(wa_state):
+        if is_wa_related_message(message, wa_state):
+            # Kullanici kurulu botu sifirdan baska numaraya kurmak istiyorsa kurulum ucretsiz
+            if has_wa_kw and (
+                any(w in low for w in ('yeni bot', 'yeni whatsapp', 'baştan kur', 'bastan kur', 'sıfırdan', 'sifirdan', 'yeniden bağla', 'yeniden bagla'))
+                or re.search(r'\byeni\b.*\bbot', low)
+            ):
+                return 'wa_setup_free', 'free'
+            return 'wa_service', 'wa_bot'
+        return 'standard', 'ai'
+
+    if setup_active or is_wa_related_message(message, wa_state):
+        return 'wa_setup_free', 'free'
+
+    return 'standard', 'ai'
+
+
+def should_consume_credit(username_lower: str, message: str) -> tuple:
+    """Geriye donuk uyumlu kota kontrolu (kurulum adimlari ucretsiz)."""
+    mode, bucket = classify_credit_policy(username_lower, message)
+    if bucket == 'free':
+        return 'setup_free', False
+    if bucket == 'wa_bot':
+        return 'wa_service', False
+    return None, True
+
+
+def scrub_sensitive_reply(text: str) -> str:
+    """Yanitta yanlislikla tekrar edilmis ham API anahtarlarini maskeler."""
+    s = str(text or '')
+    s = re.sub(r'AIza[0-9A-Za-z_-]{12,}', '[gizli-anahtar]', s)
+    s = re.sub(r'gsk_[0-9A-Za-z_-]{12,}', '[gizli-anahtar]', s)
+    s = re.sub(r'sk-[A-Za-z0-9_-]{14,}', '[gizli-anahtar]', s)
+    return s
+
+
+def build_ai_context(username_lower: str, message: str = '') -> str:
+    """
+    Gercek yapay zekanin WhatsApp bot durumunu okuyup canli yonetebilmesi icin
+    dinamik durum baglami olusturur (kalip sablon yok).
+    """
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    user_rec = database.get_user_by_username(username_lower) or {}
+    q_snap = database.user_quota_snapshot(user_rec) if user_rec else {}
+    wa_q = q_snap.get('wa_bot') or {'limit': cfg.WA_BOT_QUOTA_LIMIT, 'used': 0, 'remaining': cfg.WA_BOT_QUOTA_LIMIT}
+
+    live_snap = None
+    if wa_state.get('connected') or wa_state.get('stage') in ('pairing', 'connected_wait_ack', 'customizing', 'active'):
+        try:
+            live_snap = get_status_snapshot(username_lower)
+        except Exception:
+            live_snap = None
+
+    st_summary = {
+        'stage': wa_state.get('stage', 'idle'),
+        'setup_active': bool(wa_state['setup_session'].get('active')),
+        'risk_accepted': bool(wa_state.get('risk_accepted')),
+        'phone_saved': _mask_phone_display(wa_state['phone']) if wa_state.get('phone') else '',
+        'phone_consent': bool(wa_state.get('phone_consent')),
+        'connected': bool((live_snap or {}).get('connected', wa_state.get('connected'))),
+        'sleep_state': (live_snap or {}).get('sleep_state', 'idle'),
+        'messages_handled': int((live_snap or {}).get('messages_handled') or 0),
+        'config': sanitize_config_summary(wa_state),
+        'wa_service_quota': {
+            'limit': wa_q.get('limit', 10),
+            'remaining': wa_q.get('remaining', 10),
+        },
+    }
+    return (
+        "CANLI WHATSAPP BOT DURUMU (Aslan AI gercek zamanli kontrol):\n"
+        + json.dumps(st_summary, ensure_ascii=False)
+        + "\n\nWHATSAPP BOT YONETIM TALIMATLARI:\n"
+        "- Kullaniciya asla kalip veya numarali sihirbaz metinleri (1/5, 2/5 vb.) yazma; gercek bir asistan gibi dogal, net ve zeki yanit ver.\n"
+        "- Kullanici hangi AI modelini/saglayicisini baglamak istedigini, kurallarini, bekleme suresini veya sorusunu yazdiginda bunu anlayip dogrudan yanitla veya ilgili action ile uygula.\n"
+        "- Kurulum ve yapilandirma adimlari kullanicinin mevcut hakkini dusmez (ucretsizdir); kurulum tamamlandiktan sonra WhatsApp bot hizmeti tarafinda toplam 10 hak tanimlidir.\n"
+        "- Eslestirme kodu (wa_bot_pair) uretmeden once: (1) WhatsApp hesabi kisitlama/askiya alma riskini ve sorumlulugun kullaniciya ait oldugunu acikca bildirip onayini al, (2) telefon numarasini alip eslestirmeye izin verdigini dogrula. Kullanici konusmada bunlari zaten onayladiysa ve gecerli numara verdiyse dogrudan wa_bot_pair cagir.\n"
+        "- wa_bot_pair cagirirken kullanicinin verdigi numarayi params.phone alanina yaz (veya kayitli numara zaten varsa bos birakabilirsin); sahte kod uydurma, kodu arka plan servisi uretir.\n"
+        "- Baglanti kurulduktan veya ayarlar alindiktan sonra wa_bot_update ile kurallari, gecikmeyi, ozel AI model/anahtarini kaydedip ilk kurulumu tamamlamak icin finalize_setup: true gonder.\n"
+        "- Arka plan kutuphane/sunucu adlarini (Baileys, Vercel vb.) ve ham API anahtarlarini yanitinda ASLA gecirme."
+    )
+
+
+def action_start_setup(username_lower: str, params: dict) -> dict:
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    p = params if isinstance(params, dict) else {}
+    if wa_state.get('stage') in ('idle', 'stopped', ''):
+        wa_state['stage'] = 'awaiting_risk_consent'
+    wa_state['setup_session'] = {
+        'active': True,
+        'credit_charged': False,
+        'started_at': int(time.time()),
+    }
+    if p.get('risk_accepted') is True:
+        wa_state['risk_accepted'] = True
+        if wa_state['stage'] == 'awaiting_risk_consent':
+            wa_state['stage'] = 'awaiting_phone'
+    if p.get('phone'):
+        digits = _extract_phone(str(p.get('phone')))
+        if digits:
+            wa_state['phone'] = digits
+            if p.get('phone_consent') is True:
+                wa_state['phone_consent'] = True
+                wa_state['stage'] = 'awaiting_code_confirm'
+            else:
+                wa_state['stage'] = 'awaiting_phone_consent'
+    database.save_user_wa_bot(username_lower, wa_state)
+    return {
+        'success': True,
+        'operation': 'wa_bot_start_setup',
+        'stage': wa_state['stage'],
+    }
+
+
+def action_pair(username_lower: str, params: dict) -> dict:
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    p = params if isinstance(params, dict) else {}
+    raw_phone = str(p.get('phone') or wa_state.get('phone') or '').strip()
+    digits = _extract_phone(raw_phone)
+    if not digits:
+        return {
+            'success': False,
+            'operation': 'wa_bot_pair',
+            'error': 'Geçerli bir telefon numarası bulunamadı. Lütfen ülke koduyla birlikte yazın (ör. +90 555 123 45 67).',
+        }
+    wa_state['phone'] = digits
+    wa_state['risk_accepted'] = True
+    wa_state['phone_consent'] = True
+    wa_state['code_confirmed'] = True
+    wa_state['setup_session']['active'] = True
+    wa_state['setup_session']['credit_charged'] = False
+
+    pair_res = call_wa_worker(
+        'POST',
+        '/wa/pair',
+        {
+            'user_id': username_lower,
+            'phone': digits,
+            'config': build_runtime_config(wa_state),
+        },
+        timeout=35,
+    )
+    if not pair_res.get('success'):
+        database.save_user_wa_bot(username_lower, wa_state)
+        return {
+            'success': False,
+            'operation': 'wa_bot_pair',
+            'error': pair_res.get('error', 'Eşleştirme kodu şu an alınamadı.'),
+            'wa_event': {'type': 'pairing_retry'},
+        }
+
+    if pair_res.get('already_connected'):
+        wa_state['connected'] = True
+        wa_state['stage'] = 'connected_wait_ack'
+        database.save_user_wa_bot(username_lower, wa_state)
+        return {
+            'success': True,
+            'operation': 'wa_bot_pair',
+            'already_connected': True,
+            'wa_event': {'type': 'connected', 'connected': True},
+        }
+
+    raw8 = str(pair_res.get('pairing_code') or '')
+    formatted = str(pair_res.get('formatted_code') or raw8)
+    wa_state['pairing_code'] = raw8
+    wa_state['stage'] = 'pairing'
+    database.save_user_wa_bot(username_lower, wa_state)
+    return {
+        'success': True,
+        'operation': 'wa_bot_pair',
+        'pairing_code': raw8,
+        'formatted_code': formatted,
+        'wa_event': {
+            'type': 'pairing_code',
+            'code': raw8,
+            'formatted_code': formatted,
+            'expires_in': int(pair_res.get('expires_in') or 60),
+            'status': 'pairing',
+        },
+    }
+
+
+def action_status(username_lower: str) -> dict:
+    snap = get_status_snapshot(username_lower)
+    ev = None
+    if snap.get('connected') and not snap.get('connected_ack'):
+        ev = {'type': 'connected', 'connected': True}
+    elif snap.get('config_summary'):
+        ev = {'type': 'status', 'status': snap}
+    return {
+        'success': True,
+        'operation': 'wa_bot_status',
+        'status': snap,
+        'wa_event': ev,
+    }
+
+
+def action_wake(username_lower: str) -> dict:
+    res = wake_user_bot(username_lower, force=True)
+    return {
+        'success': bool(res.get('success', False)),
+        'operation': 'wa_bot_wake',
+        'awake': bool(res.get('awake', False)),
+    }
+
+
+def action_stop(username_lower: str, params: dict) -> dict:
+    p = params if isinstance(params, dict) else {}
+    res = stop_user_bot(username_lower, logout=bool(p.get('logout')))
+    return {
+        'success': bool(res.get('success', True)),
+        'operation': 'wa_bot_stop',
+        'wa_event': {'type': 'config_updated', 'config_summary': res.get('config_summary', {})},
+    }
+
+
+def action_cancel_setup(username_lower: str) -> dict:
+    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
+    wa_state['stage'] = 'idle'
+    wa_state['setup_session']['active'] = False
+    database.save_user_wa_bot(username_lower, wa_state)
+    return {
+        'success': True,
+        'operation': 'wa_bot_cancel_setup',
+        'wa_event': {'type': 'setup_cancelled'},
+    }
 
 _YES_WORDS = frozenset({
     'evet', 'onay', 'onayliyorum', 'onaylıyorum', 'kabul', 'kabul ediyorum',
@@ -397,6 +666,8 @@ def is_wa_setup_trigger(message: str) -> bool:
     ))
 
 
+_ACTIVE_STAGES = _SETUP_STAGES
+
 def is_in_active_setup(wa_state: dict) -> bool:
     st = _normalize_wa_state(wa_state)
     return bool(st['setup_session'].get('active')) and st.get('stage') in _ACTIVE_STAGES
@@ -465,7 +736,8 @@ def wake_user_bot(username_lower: str, force: bool = True) -> dict:
 
 
 def confirm_connected(username_lower: str) -> dict:
-    """Kullanici 'Baglantiniz basarili' bildirimini onayladiginda 0 hakla ozellestirmeyi baslatir."""
+    """Kullanici 'Baglantiniz basarili' bildirimini onayladiginda AI esliginde ozellestirmeyi baslatir."""
+    from . import ai_engine
     wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
     snap = get_status_snapshot(username_lower)
     if not snap.get('connected'):
@@ -476,14 +748,28 @@ def confirm_connected(username_lower: str) -> dict:
         }
     wa_state['connected'] = True
     wa_state['connected_ack'] = True
-    wa_state['stage'] = 'custom_triggers'
+    wa_state['stage'] = 'customizing'
     wa_state['setup_session']['active'] = True
     database.save_user_wa_bot(username_lower, wa_state)
-    q1 = _question_triggers_text()
+
+    ctx = build_ai_context(username_lower)
+    ai_prompt = (
+        "Kullanıcının WhatsApp cihaz bağlantısı az önce başarıyla onaylandı. "
+        "Kalıp veya numaralı liste (1/5 vb.) kullanmadan doğal ve samimi şekilde tebrik et; "
+        "botunun kimlere nasıl cevap vereceğini, üslubunu, bekleme/yazıyor davranışını ve isterse "
+        "kendi yapay zekasını bağlamak isteyip istemediğini tek akıcı mesajda sor."
+    )
+    q_reply, _ = ai_engine.generate_reply(ai_prompt, extra_context=ctx)
+    if not q_reply:
+        q_reply = (
+            "✅ **WhatsApp bağlantınız onaylandı!** Botunuzu nasıl yönetelim?\n\n"
+            "Bana doğrudan istediğiniz gibi tarif edebilirsiniz: hangi mesajlara veya gruplara yanıt vereceğini, "
+            "kaç saniye \"yazıyor...\" göstereceğini, üslubunu/kurallarını ve varsa bağlamak istediğiniz yapay zeka modelini söyleyebilirsiniz."
+        )
     return {
         'success': True,
-        'reply': q1,
-        'wa_event': {'type': 'customization_started', 'stage': 'custom_triggers', 'connected': True},
+        'reply': scrub_sensitive_reply(q_reply),
+        'wa_event': {'type': 'customization_started', 'stage': 'customizing', 'connected': True},
         'status': get_status_snapshot(username_lower),
     }
 
@@ -504,44 +790,32 @@ def stop_user_bot(username_lower: str, logout: bool = False) -> dict:
     }
 
 
-def _question_triggers_text() -> str:
-    return (
-        "✅ **Bağlantınız başarılı olarak onaylandı!** Şimdi Aslan AI WhatsApp botunuzu adım adım özelleştirelim *(bu kurulum tek hak kapsamındadır)*.\n\n"
-        "**1/5 — Tetikleyici ve Sessiz Kalma Kuralları:**\n"
-        "Bot hangi mesajlara veya komutlara cevap versin, hangilerine sessiz kalsın?\n"
-        "*(Örn: \"Tüm mesajlara cevap versin ama reklam, link kelimelerine sessiz kalsın\" veya \"Sadece fiyat, bilgi, merhaba kelimelerine cevap versin\")*"
-    )
+def process_action_outcome(action_res, clean_reply: str, orig_reply: str) -> tuple:
+    """
+    wa_bot_* eylem sonucunu isler:
+      Returns (is_wa_action, media_result_out, reply_out, wa_event_out)
+    """
+    if not isinstance(action_res, dict):
+        return False, action_res, orig_reply, None
+    op = str(action_res.get('operation') or '').strip()
+    if not op.startswith('wa_bot_'):
+        return False, action_res, orig_reply, None
 
+    wa_event = action_res.get('wa_event')
+    if op == 'wa_bot_pair':
+        if not action_res.get('success'):
+            err = api_utils.safe_error_message(
+                action_res.get('error'),
+                'Aslan AI WhatsApp eşleştirme kodu şu an oluşturulamadı. Lütfen tekrar deneyin.',
+            )
+            return True, None, '⚠️ %s' % err, wa_event or {'type': 'pairing_retry'}
+        return True, None, clean_reply or orig_reply or '8 haneli eşleştirme kodunuz hazır!', wa_event
 
-def _question_groups_text() -> str:
-    return (
-        "**2/5 — Grup ve Özel Mesaj Davranışı:**\n"
-        "Bot grup sohbetlerinde ve özel mesajlarda nasıl davransın?\n"
-        "*(Örn: \"Özel mesajlarda cevap versin, gruplarda cevap vermesin\" veya \"Gruplarda sadece etiket/tetikleyici geçince yazsın\")*"
-    )
+    if op in ('wa_bot_update', 'wa_bot_stop'):
+        fallback = 'WhatsApp bot ayarları güncellendi.' if op == 'wa_bot_update' else 'WhatsApp botu durduruldu.'
+        return True, None, clean_reply or orig_reply or fallback, wa_event
 
-
-def _question_human_text() -> str:
-    return (
-        "**3/5 — İnsansı Zamanlama ve Yazıyor Bilgisi:**\n"
-        "Cevap verirken insan gibi görünmesi için kaç saniye beklesin ve **\"yazıyor...\"** bilgisini göstersin mi?\n"
-        "*(Örn: \"3 saniye beklesin ve yazıyor göstersin\" veya \"1 saniye beklesin, yazıyor kapalı\")*"
-    )
-
-
-def _question_tone_text() -> str:
-    return (
-        "**4/5 — Üslup, Kurallar ve Otomatik Tepkiler:**\n"
-        "Botun üslubu, özel kural/yanıtları ve otomatik emoji tepkileri nasıl olsun?\n"
-        "*(Örn: \"Samimi ve nazik olsun; teşekkür -> ❤️; fiyat -> Güncel fiyat listemiz için 1 yazın\")*"
-    )
-
-
-def _question_ai_choice_text() -> str:
-    return (
-        "**5/5 — Yapay Zeka Entegrasyonu:**\n"
-        "Botuna kendi yapay zekanı bağlamak ister misin? Bağlamak istiyorsan API anahtarını paylaşabilirsin, istemiyorsan sadece belirlediğin kurallara göre çalışacak şekilde ayarlayabilirim."
-    )
+    return True, None, clean_reply or orig_reply, wa_event
 
 
 def _sync_worker_config(username_lower: str, wa_state: dict) -> dict:
@@ -595,6 +869,14 @@ def apply_structured_update(username_lower: str, params: dict) -> dict:
     wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
     p = params if isinstance(params, dict) else {}
     cfg_obj = wa_state['config']
+    if p.get('phone'):
+        digits = _extract_phone(str(p.get('phone')))
+        if digits:
+            wa_state['phone'] = digits
+    if 'risk_accepted' in p:
+        wa_state['risk_accepted'] = bool(p['risk_accepted'])
+    if 'phone_consent' in p:
+        wa_state['phone_consent'] = bool(p['phone_consent'])
     for bool_key in ('enabled', 'allow_groups', 'allow_private', 'show_typing'):
         if bool_key in p:
             cfg_obj[bool_key] = bool(p[bool_key])
@@ -615,321 +897,54 @@ def apply_structured_update(username_lower: str, params: dict) -> dict:
         cfg_obj['rules'] = [r for r in p['rules'] if isinstance(r, dict)]
     if 'auto_reactions' in p and isinstance(p['auto_reactions'], list):
         cfg_obj['auto_reactions'] = [r for r in p['auto_reactions'] if isinstance(r, dict)]
+
+    if isinstance(p.get('custom_ai'), dict):
+        cai_in = p['custom_ai']
+        cur_cai = cfg_obj.setdefault('custom_ai', {})
+        if cai_in.get('enabled') is False:
+            cur_cai.update({
+                'enabled': False, 'provider': '', 'model': '', 'endpoint': '',
+                'api_key_enc': '', 'has_key': False,
+            })
+        else:
+            raw_key = str(cai_in.get('api_key') or '').strip()
+            provider = str(cai_in.get('provider') or cur_cai.get('provider') or '').strip().lower()
+            model = str(cai_in.get('model') or cur_cai.get('model') or '').strip()
+            endpoint = str(cai_in.get('endpoint') or cur_cai.get('endpoint') or '').strip()
+            if raw_key:
+                det_p, _ = _detect_provider_and_key(raw_key)
+                cur_cai['api_key_enc'] = database.encrypt_secret_value(raw_key)
+                cur_cai['has_key'] = True
+                provider = provider or det_p or 'openai'
+            cur_cai['enabled'] = bool(cai_in.get('enabled', True) and (cur_cai.get('has_key') or cur_cai.get('api_key_enc')))
+            cur_cai['provider'] = provider
+            cur_cai['model'] = model
+            cur_cai['endpoint'] = endpoint
+
+    finalized = bool(p.get('finalize_setup')) or (
+        wa_state.get('connected') and wa_state.get('stage') in ('customizing', 'connected_wait_ack', 'custom_triggers', 'custom_groups', 'custom_human', 'custom_tone', 'custom_ai_choice', 'custom_ai_key')
+    )
+    if finalized:
+        if not cfg_obj.get('default_reply') and not (cfg_obj.get('custom_ai') or {}).get('enabled') and not cfg_obj.get('rules'):
+            cfg_obj['default_reply'] = 'Merhaba! Mesajınız alındı. Aslan AI WhatsApp asistanı olarak size en kısa sürede yardımcı olacağım.'
+        cfg_obj['enabled'] = True
+        wa_state['stage'] = 'active'
+        wa_state['setup_session']['active'] = False
+
     if p.get('enabled') is False:
         call_wa_worker('POST', '/wa/stop', {'user_id': username_lower, 'logout': False}, timeout=8)
     else:
         _sync_worker_config(username_lower, wa_state)
     database.save_user_wa_bot(username_lower, wa_state)
     summary = sanitize_config_summary(wa_state)
+    ev_type = 'bot_ready' if finalized else 'config_updated'
     return {
         'success': True,
         'operation': 'wa_bot_update',
         'label': 'WhatsApp Bot Güncellemesi',
         'config_summary': summary,
+        'wa_event': {'type': ev_type, 'config_summary': summary},
     }
 
 
-def apply_live_update_text(username_lower: str, message: str) -> tuple:
-    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
-    _apply_natural_customization_rules(wa_state['config'], message)
-    low = _tr_lower(message)
-    if 'üslup' in low or 'uslup' in low or 'resmi' in low or 'samimi' in low:
-        wa_state['config']['tone'] = message.strip()[:200]
-    if wa_state['config'].get('enabled') is False:
-        call_wa_worker('POST', '/wa/stop', {'user_id': username_lower, 'logout': False}, timeout=8)
-    else:
-        _sync_worker_config(username_lower, wa_state)
-    database.save_user_wa_bot(username_lower, wa_state)
-    summary = sanitize_config_summary(wa_state)
-    reply = (
-        "✅ **WhatsApp Bot Ayarlarınız Canlı Olarak Güncellendi:**\n"
-        "• **Durum:** %s\n"
-        "• **Özel Mesaj / Grup:** Özel: %s | Grup: %s (%s)\n"
-        "• **Tetikleyici Kelimeler:** %s\n"
-        "• **İnsansı Gecikme / Yazıyor:** %s sn | %s"
-        % (
-            'Aktif' if summary['enabled'] else 'Durduruldu',
-            'Açık' if summary['allow_private'] else 'Kapalı',
-            'Açık' if summary['allow_groups'] else 'Kapalı',
-            summary['group_mode'],
-            ', '.join(summary['trigger_keywords']) if summary['trigger_keywords'] else 'Tüm mesajlar',
-            summary['typing_delay_seconds'],
-            'Açık' if summary['show_typing'] else 'Kapalı',
-        )
-    )
-    return reply, {'type': 'config_updated', 'config_summary': summary}
-
-
-def should_consume_credit(username_lower: str, message: str) -> tuple:
-    """
-    WhatsApp bot akisinda tek hak (toplam 1 kredi) kuralini uygular.
-
-    Returns: (intercept_type, needs_credit_charge)
-      intercept_type: 'setup_continue' | 'setup_start' | 'live_update' | None
-    """
-    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
-    if is_in_active_setup(wa_state):
-        already_charged = bool(wa_state['setup_session'].get('credit_charged'))
-        return 'setup_continue', (not already_charged)
-    if is_wa_setup_trigger(message):
-        return 'setup_start', True
-    if is_live_update_intent(message, wa_state):
-        return 'live_update', True
-    return None, True
-
-
-def handle_chat_turn(username_lower: str, message: str, consume_credit_fn=None):
-    """
-    WhatsApp bot olusturucu / canli guncelleyici konusma adimini isletir.
-
-    Returns: (handled: bool, reply: str, wa_event: dict | None, credit_consumed: bool)
-    """
-    wa_state = _normalize_wa_state(database.get_user_wa_bot(username_lower))
-    msg = str(message or '').strip()
-
-    # 1) Yeni kurulum baslatma
-    if is_wa_setup_trigger(msg) and not is_in_active_setup(wa_state):
-        if callable(consume_credit_fn):
-            consume_credit_fn()
-        fresh = _default_wa_state()
-        fresh['stage'] = 'awaiting_risk_consent'
-        fresh['setup_session'] = {
-            'active': True,
-            'credit_charged': True,
-            'started_at': int(time.time()),
-        }
-        database.save_user_wa_bot(username_lower, fresh)
-        reply = (
-            "⚠️ **Önemli Risk Bilgilendirmesi ve Sorumluluk Reddi**\n\n"
-            "WhatsApp botu oluşturmak için resmi olmayan üçüncü taraf çoklu cihaz bağlantı yöntemleri kullanılmaktadır. Devam etmeden önce şu riskleri bilmeniz gerekir:\n"
-            "• WhatsApp hesabınız geçici olarak kısıtlanabilir, askıya alınabilir veya kalıcı olarak kapatılabilir.\n"
-            "• Bağlantı beklenmedik şekilde kesilebilir veya oturum sonlandırılabilir.\n"
-            "• Otomatik yanıtların ve hesabınızdan gönderilen tüm mesajların hukuki/hesap içi sorumluluğu tamamen size aittir.\n\n"
-            "**Sorumluluk Reddi:** Bu işlemden doğabilecek hiçbir hesap kısıtlaması, veri kaybı veya aksaklıktan **Aslan AI ve site yönetimi sorumlu tutulamaz.**\n"
-            "*(Not: Tüm WhatsApp bot kurulum ve özelleştirme adımları toplamda yalnızca **1 hak** sayılır.)*\n\n"
-            "Yukarıdaki riskleri ve sorumluluk reddini kabul ediyor musunuz? (**Onaylıyorum** / **İptal**)"
-        )
-        return True, reply, {'type': 'risk_prompt', 'stage': 'awaiting_risk_consent'}, True
-
-    # 2) Devam eden kurulum adimlari (0 ek hak!)
-    if is_in_active_setup(wa_state):
-        stage = wa_state.get('stage')
-
-        if _is_negative(msg) and stage in (
-            'awaiting_risk_consent', 'awaiting_phone', 'awaiting_phone_consent', 'awaiting_code_confirm', 'pairing'
-        ):
-            wa_state['stage'] = 'idle'
-            wa_state['setup_session']['active'] = False
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, "İşlem isteğiniz üzerine durduruldu. Onayınız olmadan hiçbir WhatsApp bağlantısı başlatılmadı.", {
-                'type': 'setup_cancelled'
-            }, False
-
-        if stage == 'awaiting_risk_consent':
-            if not _is_affirmative(msg):
-                return True, (
-                    "Devam edebilmem için risk bilgilendirmesini ve sorumluluk reddini açıkça onaylamanız gerekir (**Onaylıyorum** veya **İptal** yazabilirsiniz)."
-                ), {'type': 'risk_prompt', 'stage': 'awaiting_risk_consent'}, False
-            wa_state['risk_accepted'] = True
-            wa_state['stage'] = 'awaiting_phone'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, (
-                "✅ Risk bildirimi ve sorumluluk reddi onaylandı.\n\n"
-                "Lütfen WhatsApp botunu bağlamak istediğiniz telefon numarasını ülke koduyla birlikte yazın *(örn: `+90 555 123 45 67`)*."
-            ), {'type': 'phone_prompt', 'stage': 'awaiting_phone'}, False
-
-        if stage == 'awaiting_phone':
-            digits = _extract_phone(msg)
-            if not digits:
-                return True, (
-                    "Geçerli bir telefon numarası algılanamadı. Lütfen ülke koduyla birlikte girin *(örn: `+90 555 123 45 67`)*."
-                ), {'type': 'phone_prompt', 'stage': 'awaiting_phone'}, False
-            wa_state['phone'] = digits
-            wa_state['stage'] = 'awaiting_phone_consent'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, (
-                "Girdiğiniz **%s** numaralı telefonun WhatsApp cihaz eşleştirme işlemi için kullanılmasına izin veriyor musunuz?\n"
-                "(**İzin veriyorum** / **İptal**)" % _mask_phone_display(digits)
-            ), {'type': 'phone_consent_prompt', 'stage': 'awaiting_phone_consent'}, False
-
-        if stage == 'awaiting_phone_consent':
-            if not _is_affirmative(msg):
-                return True, (
-                    "Telefon numarasının eşleştirme için kullanılmasına açıkça izin vermeniz gerekiyor (**İzin veriyorum** veya **İptal**)."
-                ), {'type': 'phone_consent_prompt', 'stage': 'awaiting_phone_consent'}, False
-            wa_state['phone_consent'] = True
-            wa_state['stage'] = 'awaiting_code_confirm'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, (
-                "⏳ **Önemli Hatırlatma:** Üretilecek **8 haneli eşleştirme kodunun (pairing code) geçerlilik süresi çok kısadır** (yaklaşık 60 saniye içinde telefonunuza girmeniz gerekir).\n\n"
-                "**Kodu almayı onaylıyor musunuz?** (**Onaylıyorum / Evet / İzin veriyorum / Tamam** veya **İptal**)"
-            ), {'type': 'code_confirm_prompt', 'stage': 'awaiting_code_confirm'}, False
-
-        if stage == 'awaiting_code_confirm':
-            if not _is_affirmative(msg):
-                return True, (
-                    "Hazır olduğunuzda **Onaylıyorum**, **Evet**, **İzin veriyorum**, **Tamam** veya **Kabul ediyorum** yazarak 8 haneli kodu oluşturabilir; istemiyorsanız **İptal** diyebilirsiniz."
-                ), {'type': 'code_confirm_prompt', 'stage': 'awaiting_code_confirm'}, False
-            wa_state['code_confirmed'] = True
-            pair_res = call_wa_worker(
-                'POST',
-                '/wa/pair',
-                {
-                    'user_id': username_lower,
-                    'phone': wa_state.get('phone', ''),
-                    'config': build_runtime_config(wa_state),
-                },
-                timeout=35,
-            )
-            if not pair_res.get('success'):
-                database.save_user_wa_bot(username_lower, wa_state)
-                return True, (
-                    "⚠️ %s Hazır olduğunuzda tekrar **Onaylıyorum** veya **Evet** yazabilirsiniz."
-                    % pair_res.get('error', 'Eşleştirme kodu şu an alınamadı.')
-                ), {'type': 'pairing_retry'}, False
-
-            if pair_res.get('already_connected'):
-                wa_state['connected'] = True
-                wa_state['stage'] = 'connected_wait_ack'
-                database.save_user_wa_bot(username_lower, wa_state)
-                return True, "✅ **Bağlantınız başarılı!** Özelleştirmeye geçmek için onay butonuna tıklayın veya **Devam** yazın.", {
-                    'type': 'connected', 'connected': True
-                }, False
-
-            raw8 = str(pair_res.get('pairing_code') or '')
-            formatted = str(pair_res.get('formatted_code') or raw8)
-            wa_state['pairing_code'] = raw8
-            wa_state['stage'] = 'pairing'
-            database.save_user_wa_bot(username_lower, wa_state)
-            reply = (
-                "🔑 **8 Haneli Eşleştirme Kodunuz Hazır!** *(Kısa süre içinde geçersiz olur)*\n\n"
-                "Telefonunuzda şu adımları sırasıyla izleyin:\n"
-                "1. **WhatsApp > Bağlı Cihazlar > Cihaz Bağla > Telefon numarasıyla bağla** yolunu açın.\n"
-                "2. Yukarıdaki/karttaki kopyalama butonuyla kodu kopyalayıp girin.\n\n"
-                "Bağlantı tamamlandığında ekranda **\"Bağlantınız başarılı\"** bildirimi görünecektir."
-            )
-            return True, reply, {
-                'type': 'pairing_code',
-                'code': raw8,
-                'formatted_code': formatted,
-                'expires_in': int(pair_res.get('expires_in') or 60),
-                'status': 'pairing',
-            }, False
-
-        if stage in ('pairing', 'connected_wait_ack'):
-            snap = get_status_snapshot(username_lower)
-            if 'yeni kod' in _tr_lower(msg) or 'tekrar kod' in _tr_lower(msg):
-                wa_state['stage'] = 'awaiting_code_confirm'
-                database.save_user_wa_bot(username_lower, wa_state)
-                return handle_chat_turn(username_lower, 'onaylıyorum', consume_credit_fn=None)
-            if snap.get('connected'):
-                wa_state['connected'] = True
-                wa_state['connected_ack'] = True
-                wa_state['stage'] = 'custom_triggers'
-                database.save_user_wa_bot(username_lower, wa_state)
-                return True, _question_triggers_text(), {
-                    'type': 'customization_started', 'stage': 'custom_triggers', 'connected': True
-                }, False
-            return True, (
-                "⏳ WhatsApp bağlantısı bekleniyor. Telefonunuzdan **WhatsApp > Bağlı Cihazlar > Cihaz Bağla > Telefon numarasıyla bağla** "
-                "adımlarını tamamlayın. İsterseniz *\"yeni kod\"* yazarak taze kod isteyebilirsiniz."
-            ), {'type': 'pairing_waiting'}, False
-
-        if stage == 'custom_triggers':
-            cfg_obj = wa_state['config']
-            low = _tr_lower(msg)
-            if any(p in low for p in ('sessiz kal', 'yoksay', 'cevap verme')):
-                # Kabaca "x kelimelerine sessiz kal" ayristirma
-                quoted = _extract_quoted_terms(msg)
-                if quoted and ('sadece' not in low):
-                    cfg_obj['ignored_keywords'] = quoted
-            _apply_natural_customization_rules(cfg_obj, msg)
-            if not cfg_obj['trigger_keywords'] and ('herkese' not in low and 'tüm' not in low and 'tum' not in low):
-                quoted = _extract_quoted_terms(msg)
-                if quoted:
-                    cfg_obj['trigger_keywords'] = quoted
-            wa_state['stage'] = 'custom_groups'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, _question_groups_text(), {'type': 'custom_step', 'stage': 'custom_groups'}, False
-
-        if stage == 'custom_groups':
-            _apply_natural_customization_rules(wa_state['config'], msg)
-            wa_state['stage'] = 'custom_human'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, _question_human_text(), {'type': 'custom_step', 'stage': 'custom_human'}, False
-
-        if stage == 'custom_human':
-            _apply_natural_customization_rules(wa_state['config'], msg)
-            wa_state['stage'] = 'custom_tone'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, _question_tone_text(), {'type': 'custom_step', 'stage': 'custom_tone'}, False
-
-        if stage == 'custom_tone':
-            wa_state['config']['tone'] = msg.strip()[:240]
-            wa_state['config']['instructions'] = msg.strip()[:1200]
-            _apply_natural_customization_rules(wa_state['config'], msg)
-            wa_state['stage'] = 'custom_ai_choice'
-            database.save_user_wa_bot(username_lower, wa_state)
-            return True, _question_ai_choice_text(), {'type': 'custom_step', 'stage': 'custom_ai_choice'}, False
-
-        if stage == 'custom_ai_choice':
-            provider, key = _detect_provider_and_key(msg)
-            if key:
-                wa_state['config']['custom_ai'] = {
-                    'enabled': True,
-                    'provider': provider or 'openai',
-                    'model': '',
-                    'endpoint': '',
-                    'api_key_enc': database.encrypt_secret_value(key),
-                    'has_key': True,
-                }
-                reply, ev = _finalize_bot_setup(username_lower, wa_state)
-                return True, reply, ev, False
-            if _is_negative(msg):
-                wa_state['config']['custom_ai'] = {
-                    'enabled': False, 'provider': '', 'model': '', 'endpoint': '',
-                    'api_key_enc': '', 'has_key': False,
-                }
-                reply, ev = _finalize_bot_setup(username_lower, wa_state)
-                return True, reply, ev, False
-            if _is_affirmative(msg) or 'bağla' in _tr_lower(msg) or 'bagla' in _tr_lower(msg):
-                wa_state['stage'] = 'custom_ai_key'
-                database.save_user_wa_bot(username_lower, wa_state)
-                return True, (
-                    "Harika! Hangi yapay zeka sağlayıcısını kullanacağınızı *(örn: OpenAI, Gemini, Groq, Anthropic)* ve **API anahtarınızı** yazın "
-                    "*(anahtarınız şifreli olarak güvenle saklanır)*. İsterseniz vazgeçip *\"kurallara göre ayarla\"* diyebilirsiniz."
-                ), {'type': 'custom_step', 'stage': 'custom_ai_key'}, False
-            return True, _question_ai_choice_text(), {'type': 'custom_step', 'stage': 'custom_ai_choice'}, False
-
-        if stage == 'custom_ai_key':
-            if _is_negative(msg):
-                wa_state['config']['custom_ai'] = {
-                    'enabled': False, 'provider': '', 'model': '', 'endpoint': '',
-                    'api_key_enc': '', 'has_key': False,
-                }
-                reply, ev = _finalize_bot_setup(username_lower, wa_state)
-                return True, reply, ev, False
-            provider, key = _detect_provider_and_key(msg)
-            if not key:
-                return True, (
-                    "Geçerli bir API anahtarı algılanamadı. Lütfen API anahtarınızı *(sağlayıcı adıyla birlikte)* yazın veya kural tabanlı mod için **\"hayır\"** deyin."
-                ), {'type': 'custom_step', 'stage': 'custom_ai_key'}, False
-            wa_state['config']['custom_ai'] = {
-                'enabled': True,
-                'provider': provider or 'openai',
-                'model': '',
-                'endpoint': '',
-                'api_key_enc': database.encrypt_secret_value(key),
-                'has_key': True,
-            }
-            reply, ev = _finalize_bot_setup(username_lower, wa_state)
-            return True, reply, ev, False
-
-    # 3) Aktif bot canli guncelleme
-    if is_live_update_intent(msg, wa_state):
-        if callable(consume_credit_fn):
-            consume_credit_fn()
-        reply, ev = apply_live_update_text(username_lower, msg)
-        return True, reply, ev, True
-
-    return False, '', None, False
+# Statik kalip akisi kaldirildi: tum yonetim Aslan AI + wa_bot_* aksiyonlari uzerinden yurur.

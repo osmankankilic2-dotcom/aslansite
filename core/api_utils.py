@@ -17,7 +17,7 @@ _SAFE_EXT_RE = re.compile(r'^\.[a-z0-9]{1,8}$')
 _LOCAL_HOSTS = frozenset({'localhost', '127.0.0.1', '::1', '[::1]'})
 _BACKEND_LEAK_RE = re.compile(
     r'\b(?:gemini|imagen|nano[-_ ]?banana|pollinations|googleapis|generativelanguage|'
-    r'openai|gpt-[0-9a-z.-]+|chatgpt|mistral|deepseek|llama|claude|anthropic|groq|'
+    r'duckduckgo|duckchat|deepinfra|openai|gpt-[0-9a-z.-]+|chatgpt|mistral|deepseek|llama|claude|anthropic|groq|'
     r'hugging ?face|flux|stability|sdxl|ffmpeg|ffprobe|libav\w*|libx26\d|'
     r'yt[-_ ]?dlp|youtube[-_ ]?dl|baileys|whiskeysockets|edge[-_ ]?tts|gtts|pillow|imageio|'
     r'static[-_ ]?ffmpeg|vercel|flask|werkzeug|gunicorn|uvicorn|urllib|sqlite|'

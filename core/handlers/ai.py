@@ -88,6 +88,7 @@ class handler(BaseHTTPRequestHandler):
             history = data.get('history')
             if not isinstance(history, list):
                 history = []
+            chat_id = str(data.get('chat_id', '') or '').strip()
 
             metas = []
             for i, entry in enumerate(files_inline):
@@ -108,10 +109,16 @@ class handler(BaseHTTPRequestHandler):
                                     methods='POST, OPTIONS')
                 return
 
-            # Hesaba bagli kalici DB kota kontrolu ve WhatsApp bot tek-hak akisi
+            # Hesaba bagli DB kota kontrolu:
+            # - WhatsApp bot kurulumu ucretsizdir (standart hak dusulmez)
+            # - Kurulum sonrasi WhatsApp bot hizmeti ayri 10 haklik kotadan dusulur
+            # - Normal sohbetler standart gunluk AI hakkiyla devam eder
             uname_lower = user['username_lower']
-            wa_kind, needs_credit = wa_bot.should_consume_credit(uname_lower, message)
-            if needs_credit:
+            credit_mode, credit_bucket = wa_bot.classify_credit_policy(uname_lower, message)
+            usage = database.user_quota_snapshot(user)['ai']
+            ip = api_utils.client_ip(self.headers)
+
+            if credit_bucket == 'ai':
                 allowed, usage = database.check_user_ai_quota(uname_lower)
                 if not allowed:
                     snap = database.user_quota_snapshot(user)
@@ -127,7 +134,6 @@ class handler(BaseHTTPRequestHandler):
                     )
                     return
 
-                ip = api_utils.client_ip(self.headers)
                 ip_ok, ip_usage = quota_mod.check_and_consume_ip(
                     ip, 'ai', cfg.IP_AI_DAILY_LIMIT, quota_mod.DAY)
                 if not ip_ok:
@@ -138,30 +144,37 @@ class handler(BaseHTTPRequestHandler):
                         methods='POST, OPTIONS',
                     )
                     return
-
-            if wa_kind is not None:
-                def _charge_once():
-                    if needs_credit:
-                        database.consume_user_ai_quota(uname_lower)
-                handled, wa_reply, wa_event, _ = wa_bot.handle_chat_turn(
-                    uname_lower, message, consume_credit_fn=_charge_once)
-                if handled:
-                    fresh_user = database.get_user_by_username(uname_lower) or user
-                    snap = database.user_quota_snapshot(fresh_user)
+            elif credit_bucket == 'wa_bot':
+                wa_allowed, wa_usage = database.check_user_wa_quota(uname_lower)
+                if not wa_allowed:
+                    snap = database.user_quota_snapshot(user)
                     api_utils.send_json(
-                        self, 200,
+                        self, 429,
                         {
-                            'reply': wa_reply,
+                            'error': ('WhatsApp bot hizmeti için tanımlı %d kullanım hakkınız doldu.'
+                                      % wa_usage.get('limit', cfg.WA_BOT_QUOTA_LIMIT)),
                             'remaining': snap['ai']['remaining'],
                             'quota': snap,
-                            'media_result': None,
-                            'image_result': None,
-                            'generated_images': [],
-                            'wa_event': wa_event,
                         },
                         methods='POST, OPTIONS',
                     )
                     return
+
+                ip_ok, ip_usage = quota_mod.check_and_consume_ip(
+                    ip, 'wa', cfg.IP_WA_HOURLY_LIMIT, 3600)
+                if not ip_ok:
+                    api_utils.send_json(
+                        self, 429,
+                        {'error': 'Bu agdan cok fazla bot istegi gonderildi. Lutfen %d saniye sonra tekrar deneyin.'
+                                  % ip_usage.get('reset_in', 60)},
+                        methods='POST, OPTIONS',
+                    )
+                    return
+
+            wa_state_cur = database.get_user_wa_bot(uname_lower)
+            extra_ctx = ''
+            if credit_bucket in ('free', 'wa_bot') or wa_bot.is_wa_related_message(message, wa_state_cur):
+                extra_ctx = wa_bot.build_ai_context(uname_lower, message)
 
             parts = []
             for meta in metas:
@@ -191,7 +204,7 @@ class handler(BaseHTTPRequestHandler):
             all_available = metas + context_metas
             reply, error = ai_engine.generate_reply(
                 message, parts=parts, available_files=all_available,
-                api_key=ai_engine.get_api_key(), history=history)
+                api_key=ai_engine.get_api_key(), history=history, extra_context=extra_ctx)
             if not reply:
                 api_utils.send_json(
                     self, 502,
@@ -199,9 +212,6 @@ class handler(BaseHTTPRequestHandler):
                     methods='POST, OPTIONS',
                 )
                 return
-
-            # Yalnizca basarili yanit sonrasi hesaptan 1 hak dusulur
-            _, usage = database.consume_user_ai_quota(uname_lower)
 
             media_result = None
             image_result = None
@@ -216,16 +226,25 @@ class handler(BaseHTTPRequestHandler):
                 media_result, generated_images, pipe_paths = ai_engine.run_action_pipeline(
                     action, uploaded_files=all_available, username_lower=uname_lower)
                 created_outputs.extend(pipe_paths)
-                if isinstance(media_result, dict):
+                wa_handled, media_result, reply, wa_event = wa_bot.process_action_outcome(
+                    media_result, clean_reply, reply)
+                if not wa_handled and isinstance(media_result, dict):
                     if media_result.get('operation') == 'generate_image' and media_result.get('success'):
                         image_result = media_result
-                    elif media_result.get('operation') == 'wa_bot_update' and media_result.get('success'):
-                        wa_event = {'type': 'config_updated', 'config_summary': media_result.get('config_summary', {})}
-                        media_result = None
-                    if media_result and media_result.get('success'):
+                    if media_result.get('success'):
                         reply = clean_reply or 'Islem tamamlandi.'
-                    elif wa_event:
-                        reply = clean_reply or 'WhatsApp bot ayarları güncellendi.'
+
+            reply = wa_bot.scrub_sensitive_reply(reply)
+
+            # Kota dusumu: kurulum ucretsiz, kurulum sonrasi WA bot hizmeti ayri 10 hak, normal sohbet gunluk AI hakki
+            if credit_bucket == 'ai':
+                _, usage = database.consume_user_ai_quota(uname_lower)
+            elif credit_bucket == 'wa_bot':
+                database.consume_user_wa_quota(uname_lower)
+
+            chat_saved = database.upsert_user_chat_turn(
+                uname_lower, chat_id, message or '(dosya gönderildi)', reply)
+            saved_chat = chat_saved.get('chat') or {}
 
             fresh_user = database.get_user_by_username(uname_lower) or user
             snap = database.user_quota_snapshot(fresh_user)
@@ -233,8 +252,10 @@ class handler(BaseHTTPRequestHandler):
                 self, 200,
                 {
                     'reply': reply,
-                    'remaining': usage['remaining'],
+                    'remaining': snap['ai']['remaining'],
                     'quota': snap,
+                    'chat_id': saved_chat.get('id') or chat_id,
+                    'chat_title': saved_chat.get('title') or '',
                     'media_result': media_result,
                     'image_result': image_result,
                     'generated_images': generated_images,

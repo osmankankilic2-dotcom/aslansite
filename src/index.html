@@ -255,10 +255,7 @@
     </div>
 
     <!-- ASLAN AI -->
-    <div id="panel-ai" class="card" role="tabpanel">
-        <h3>🤖 Aslan AI</h3>
-        <p class="hint mt-0">Aslan AI ile görsel, video, ses ve PDF analizi; görsel üretimi, seslendirme ve akıllı medya düzenleme.</p>
-
+    <div id="panel-ai" class="card chat-panel-clean" role="tabpanel">
         <div id="ai-auth-lock" class="auth-lock-box">
             <img src="/assets/logo-mark.png" alt="Aslan AI Kilit">
             <h4>🔒 Aslan AI'ya Erişim İçin Giriş Yapın</h4>
@@ -269,43 +266,34 @@
             </div>
         </div>
 
-        <div id="ai-workspace" class="is-hidden">
-            <div class="quota-bar">
-                <span>Hesap AI Hakkı: <strong class="quota-count" id="quota-display">--/5</strong></span>
-                <span class="hint mt-0" id="image-quota-display">Aylık Görsel: --/2</span>
+        <div id="ai-workspace" class="is-hidden chat-workspace-clean">
+            <div class="chat-topbar">
+                <div class="chat-topbar-left">
+                    <button type="button" class="chip-btn" id="btn-toggle-history" data-action="toggle-history">🕘 Sohbetler <span id="history-count-badge"></span></button>
+                    <button type="button" class="chip-btn" data-action="new-chat">+ Yeni</button>
+                    <button type="button" class="chip-btn" data-action="open-image-studio">🎨 Görsel</button>
+                    <button type="button" class="chip-btn" data-action="toggle-subpanel" data-target="ai-commands">⚡ Komutlar</button>
+                </div>
+                <div class="chat-topbar-right">
+                    <span class="quota-pill">AI <strong class="quota-count" id="quota-display">--/5</strong></span>
+                    <span class="quota-pill">Görsel <strong id="image-quota-display">--/2</strong></span>
+                    <span class="quota-pill">Bot <strong id="wa-quota-display">--/10</strong></span>
+                </div>
             </div>
 
-            <div class="chat-box" id="chat-box" aria-live="polite">
-                <div class="msg bot"><div class="md-body"><p>Merhaba! Ben Aslan AI 🤖 Görsel, video, ses veya PDF yükleyebilir; sesli mesaj gönderebilir, görsel üretip videoya dönüştürebilir, metin/filtre/altyazı ekleyebilir veya medya düzenleme işlemlerinizi bana yaptırabilirsiniz.</p></div></div>
+            <!-- 30 Gunluk Sohbet Gecmisi ve Sabitleme (En fazla 2 sohbet) -->
+            <div class="sub-panel history-drawer" id="chat-history-drawer">
+                <div class="history-head">
+                    <strong>Sohbet Geçmişi (30 Gün)</strong>
+                    <span class="pin-limit-badge" id="pinned-count-badge">Sabitli: 0/2</span>
+                </div>
+                <p class="history-privacy-note">Sohbetleriniz model eğitimi için değil, yalnızca kaldığınız yerden devam etmeniz için 30 gün saklanır. En fazla 2 sohbeti silinmemek üzere sabitleyebilirsiniz.</p>
+                <div class="history-list" id="chat-history-list"></div>
             </div>
-
-            <div class="session-media-bar is-hidden" id="session-media-bar">
-                <span class="session-media-title">📎 Aktif Medya Bağlamı:</span>
-                <div class="session-media-chips" id="session-media-chips"></div>
-                <button type="button" class="session-media-clear" id="btn-session-media-clear" data-action="clear-session-media">Temizle</button>
-            </div>
-
-            <div class="attach-tray" id="attach-tray"></div>
-
-            <div class="input-row">
-                <textarea id="ai-input" rows="2" maxlength="8000" placeholder="Bir şey sor... (örn: 'İki görsel üret, birleştirip videoya dönüştür ve yazı ekle')"></textarea>
-                <button class="tool-btn" type="button" id="btn-mic" title="Sesli mesaj (konuşmayı metne çevirip gönderir)" aria-label="Sesli mesajı metne çevir" data-action="toggle-record">🎤</button>
-                <button class="tool-btn" type="button" id="btn-attach" title="Dosya ekle (görsel/video/ses/PDF)" data-action="trigger-ai-file">📎</button>
-            </div>
-            <input type="file" id="ai-file" multiple hidden accept="image/*,video/*,audio/*,application/pdf,.txt,.md,.csv,.json">
-
-            <div class="btn-row">
-                <button id="btn-ai" class="action-btn" type="button" data-action="send-ai">Gönder</button>
-                <button class="action-btn accent2" type="button" data-action="open-image-studio">🎨 Görsel Üret</button>
-                <button class="action-btn secondary small btn-row-mt" type="button" data-action="toggle-subpanel" data-target="ai-commands">⚡ Hızlı Komutlar</button>
-                <button class="action-btn secondary small btn-row-mt" type="button" data-action="clear-chat">🗑️ Temizle</button>
-            </div>
-
-            <p class="hint">💡 İpucu: Aslan AI üzerinden görsel/video düzenleme ("üzerine yazı ekle", "iki görsel üretip video yap", "videoyu kırp") veya Ses Stüdyosunu yönetebilirsiniz.</p>
 
             <!-- Medya & Ses Hizli Komutlari -->
             <div class="sub-panel" id="ai-commands">
-                <label>Aslan AI Hızlı Komutları:</label>
+                <label>Hızlı Komutlar:</label>
                 <div class="btn-row" id="ai-command-row">
                     <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görselin üzerine 'ASLAN' yazısını ekle">📝 Yazı Ekle</button>
                     <button class="action-btn small" type="button" data-action="ai-command" data-cmd="Bu görsele sinematik siyah beyaz filtre uygula">🎨 Filtre Uygula</button>
@@ -328,6 +316,33 @@
                 </div>
                 <p class="hint">Kullanıcı başına aylık toplam 2 görsel üretim hakkınız hesabınızda tutulur (yeni ay başladığında yenilenir).</p>
             </div>
+
+            <div class="chat-box" id="chat-box" aria-live="polite">
+                <div class="msg bot"><div class="md-body"><p>Merhaba, ben Aslan AI. Size nasıl yardımcı olabilirim?</p></div></div>
+            </div>
+
+            <div class="session-media-bar is-hidden" id="session-media-bar">
+                <span class="session-media-title">📎 Aktif Medya Bağlamı:</span>
+                <div class="session-media-chips" id="session-media-chips"></div>
+                <button type="button" class="session-media-clear" id="btn-session-media-clear" data-action="clear-session-media">Temizle</button>
+            </div>
+
+            <div class="attach-tray" id="attach-tray"></div>
+
+            <!-- Alt Mesaj Cubugu (Sagdan Sola: Gonder <- Mikrofon <- Mesaj Kutusu <- Dosya Ekle) -->
+            <div class="input-row chat-composer">
+                <button class="tool-btn attach-btn" type="button" id="btn-attach" title="Dosya ekle (görsel/video/ses/belge)" aria-label="Dosya seç ve ekle" data-action="trigger-ai-file">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <textarea id="ai-input" rows="1" maxlength="8000" placeholder="Aslan AI'ya bir mesaj yazın..."></textarea>
+                <button class="tool-btn mic-btn" type="button" id="btn-mic" title="Sesli dikte (başlat / durdur)" aria-label="Sesli mesajı metne çevir" aria-pressed="false" data-action="toggle-record">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                </button>
+                <button id="btn-ai" class="send-btn" type="button" title="Gönder" aria-label="Gönder" data-action="send-ai">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+            </div>
+            <input type="file" id="ai-file" multiple hidden accept="image/*,video/*,audio/*,application/pdf,.txt,.md,.csv,.json">
         </div>
     </div>
 
@@ -382,6 +397,7 @@
                         <li><strong>Hesap verileri:</strong> Kullanıcı adı ve tek yönlü kriptografik olarak korunan şifre bilgisi. Hesap kayıtları şifreli ve bütünlük doğrulamalı olarak saklanır.</li>
                         <li><strong>Kullanım hakları:</strong> Günlük AI ve görsel kota sayaçları hesabınıza bağlı olarak veritabanında tutulur.</li>
                         <li><strong>Çerez tercihi:</strong> Çerez onay kararınız (Kabul / Özelleştirilmiş / Reddet) kaydedilir.</li>
+                        <li><strong>Sohbet geçmişi:</strong> Kaldığınız yerden devam edebilmeniz için sohbetleriniz yalnızca size özel olarak <strong>30 gün</strong> saklanır (en fazla 2 sohbet sabitlenebilir); model eğitimi için kullanılmaz.</li>
                         <li><strong>Yüklenen içerik:</strong> Yalnızca sizin talebinizle işlenir ve işlem sonrası hemen silinir.</li>
                     </ul>
 
@@ -400,6 +416,7 @@
                     <h3>1. Hizmetler ve Kota Sınırları</h3>
                     <ul>
                         <li>Aslan AI Asistanı günde <strong>5 (beş) mesaj</strong> hakkı ile sınırlıdır.</li>
+                        <li>WhatsApp botu kurulum adımları ücretsizdir; kurulum sonrası bot yönetimi için toplam <strong>10 (on) kullanım hakkı</strong> tanımlanır.</li>
                         <li>Görsel üretimi kullanıcı başına <strong>aylık toplam 2 (iki) görsel</strong> hakkı ile sınırlıdır.</li>
                         <li>Haklar <strong>veritabanındaki kullanıcı hesabınıza bağlıdır</strong>; tarayıcı değişikliği veya sayfa yenilemesi haklarınızı sıfırlamaz.</li>
                     </ul>
