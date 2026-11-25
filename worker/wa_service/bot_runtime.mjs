@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import makeWASocketImport, {
@@ -17,9 +18,79 @@ const makeWASocket = typeof makeWASocketImport === 'function'
     : (makeWASocketImport && makeWASocketImport.default);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTH_BASE_DIR = process.env.WA_AUTH_DIR || path.join(__dirname, 'auth_sessions');
+const _defaultAuthDir = process.env.VERCEL
+    ? path.join(os.tmpdir(), 'aslan_wa_sessions')
+    : path.join(__dirname, 'auth_sessions');
+const AUTH_BASE_DIR = process.env.WA_AUTH_DIR || _defaultAuthDir;
+const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
 
 const instances = new Map();
+let cachedWaVersion = { version: FALLBACK_WA_VERSION, fetchedAt: 0 };
+
+async function getLatestWaVersion() {
+    const now = Date.now();
+    if (cachedWaVersion.fetchedAt && (now - cachedWaVersion.fetchedAt) < 6 * 3600 * 1000) {
+        return cachedWaVersion.version;
+    }
+    try {
+        const fetched = await fetchLatestBaileysVersion({ timeout: 6000, httpsAgent: ipv4Agent });
+        if (fetched && Array.isArray(fetched.version) && fetched.version.length === 3) {
+            cachedWaVersion = { version: fetched.version, fetchedAt: now };
+            return fetched.version;
+        }
+    } catch (_) {}
+    return cachedWaVersion.version || FALLBACK_WA_VERSION;
+}
+
+function waitForPairingReady(sock, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let wsCheckTimer = null;
+        const cleanup = () => {
+            if (wsCheckTimer) clearTimeout(wsCheckTimer);
+            clearTimeout(hardTimer);
+            try { sock.ev.off('connection.update', onUpdate); } catch (_) {}
+        };
+        const finishResolve = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve();
+        };
+        const finishReject = (err) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(err);
+        };
+        const onUpdate = (update) => {
+            if (!update) return;
+            if (update.qr || update.connection === 'open') {
+                finishResolve();
+                return;
+            }
+            if (update.connection === 'close') {
+                const statusCode = update.lastDisconnect && update.lastDisconnect.error
+                    ? new Boom(update.lastDisconnect.error).output?.statusCode
+                    : 0;
+                finishReject(new Error(`Handshake closed (${statusCode || 0})`));
+            }
+        };
+        const hardTimer = setTimeout(() => {
+            if (sock && sock.ws && sock.ws.isOpen) {
+                finishResolve();
+            } else {
+                finishReject(new Error('Bağlantı zaman aşımı'));
+            }
+        }, timeoutMs);
+        sock.ev.on('connection.update', onUpdate);
+        wsCheckTimer = setTimeout(() => {
+            if (!settled && sock && sock.ws && sock.ws.isOpen) {
+                finishResolve();
+            }
+        }, 5500);
+    });
+}
 
 function ensureDir(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
@@ -321,13 +392,7 @@ async function openLiveSocket(instance) {
     const sessionDir = userSessionDir(instance.userId);
     ensureDir(sessionDir);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-    let version = [2, 3000, 1015901307];
-    try {
-        const fetched = await fetchLatestBaileysVersion();
-        if (fetched && Array.isArray(fetched.version)) {
-            version = fetched.version;
-        }
-    } catch (_) {}
+    const version = await getLatestWaVersion();
 
     const sock = makeWASocket({
         version,
@@ -456,7 +521,8 @@ export async function startPairing(userId, phone, configInput = {}) {
 
     try {
         const sock = await openLiveSocket(instance);
-        await sleep(1500);
+        await waitForPairingReady(sock, 15000);
+        await sleep(300);
         if (sock.authState && sock.authState.creds && sock.authState.creds.registered) {
             instance.status = 'connected';
             instance.connected = true;

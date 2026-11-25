@@ -2,6 +2,8 @@
 Aslan AI Ozel WhatsApp Botu Olusturucu, Onay Akisi, Tek Hak Kontrolu & Canli Guncelleyici.
 """
 import copy
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -10,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import config as cfg, database
+from . import api_utils, config as cfg, database
 
 _ACTIVE_STAGES = frozenset({
     'awaiting_risk_consent',
@@ -32,6 +34,10 @@ _YES_WORDS = frozenset({
     'izin', 'izin veriyorum', 'tamam', 'olur', 'devam', 'devam et',
     'baglandim', 'bağlandım', 'baglandi', 'bağlandı', 'ok', 'yes', 'istiyorum',
     'kodu almayi onayliyorum', 'kodu almayı onaylıyorum',
+    'kodu al', 'kodu ver', 'kodu gonder', 'kodu gönder',
+    'kodu olustur', 'kodu oluştur', 'olustur', 'oluştur',
+    'baslat', 'başlat', 'peki', 'tabi', 'tabii',
+    'evet onayliyorum', 'evet onaylıyorum',
 })
 _NO_WORDS = frozenset({
     'hayir', 'hayır', 'red', 'reddediyorum', 'istemiyorum', 'iptal',
@@ -110,6 +116,21 @@ def _normalize_wa_state(raw) -> dict:
     return base
 
 
+def _vercel_bridge_host() -> str:
+    prod = (os.environ.get('VERCEL_PROJECT_PRODUCTION_URL') or '').strip()
+    if prod:
+        h = api_utils._parse_env_host(prod)
+        if h:
+            return h
+    v_env = (os.environ.get('VERCEL_ENV') or '').strip().lower()
+    v_url = (os.environ.get('VERCEL_URL') or '').strip()
+    if v_env != 'production' and v_url:
+        h = api_utils._parse_env_host(v_url)
+        if h and h.endswith('.vercel.app'):
+            return h
+    return 'aslansite.vercel.app'
+
+
 def _worker_base_url() -> str:
     env_url = (os.environ.get('WA_BOT_WORKER_URL') or cfg.WA_BOT_WORKER_URL or '').strip().rstrip('/')
     if env_url:
@@ -117,25 +138,37 @@ def _worker_base_url() -> str:
     if not os.environ.get('VERCEL'):
         port = int(os.environ.get('WA_WORKER_PORT') or cfg.WA_BOT_LOCAL_PORT or 5056)
         return 'http://127.0.0.1:%d' % port
-    return ''
+    return 'https://%s/api/wa_bridge' % _vercel_bridge_host()
 
 
 def _worker_token() -> str:
-    return (
+    explicit = (
         os.environ.get('WA_BOT_WORKER_TOKEN')
         or os.environ.get('MEDIA_WORKER_TOKEN')
         or cfg.WA_BOT_WORKER_TOKEN
         or ''
     ).strip()
+    if explicit:
+        return explicit
+    seed = (
+        os.environ.get('QUOTA_SIGNING_SECRET')
+        or os.environ.get('BLOB_READ_WRITE_TOKEN')
+        or os.environ.get('GEMINI_API_KEY')
+        or 'aslan-local-wa-secret'
+    ).strip()
+    return hmac.new(seed.encode('utf-8'), b'aslan-wa-bridge-v1', hashlib.sha256).hexdigest()
+
+
+def get_worker_endpoint() -> tuple:
+    return _worker_base_url(), _worker_token()
 
 
 def call_wa_worker(method: str, path: str, payload=None, timeout: int = 25) -> dict:
-    base = _worker_base_url()
+    base, tok = get_worker_endpoint()
     if not base:
-        return {'success': False, 'error': 'Aslan AI WhatsApp bağlantı servisi şu an yapılandırılmamış.'}
+        return {'success': False, 'error': 'Aslan AI WhatsApp eşleştirme servisine geçici olarak ulaşılamadı. Lütfen birkaç saniye sonra tekrar deneyin.'}
     url = '%s%s' % (base, path)
     headers = {'User-Agent': 'Aslan-AI-WA/1.0'}
-    tok = _worker_token()
     if tok:
         headers['X-Worker-Token'] = tok
     data = None
@@ -143,18 +176,23 @@ def call_wa_worker(method: str, path: str, payload=None, timeout: int = 25) -> d
         headers['Content-Type'] = 'application/json'
         data = json.dumps(payload or {}).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    fallback_err = 'Aslan AI WhatsApp servisi geçici olarak yanıt veremedi.'
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             parsed = json.loads(resp.read().decode('utf-8'))
-            return parsed if isinstance(parsed, dict) else {'success': False, 'error': 'Aslan AI bağlantı servisi yanıt veremedi.'}
+            if isinstance(parsed, dict):
+                if parsed.get('error'):
+                    parsed['error'] = api_utils.safe_error_message(parsed['error'], fallback_err)
+                return parsed
+            return {'success': False, 'error': 'Aslan AI bağlantı servisi yanıt veremedi.'}
     except urllib.error.HTTPError as e:
         try:
             parsed = json.loads(e.read().decode('utf-8', errors='replace'))
             if isinstance(parsed, dict) and parsed.get('error'):
-                return {'success': False, 'error': str(parsed['error'])}
+                return {'success': False, 'error': api_utils.safe_error_message(parsed['error'], fallback_err)}
         except Exception:
             pass
-        return {'success': False, 'error': 'Aslan AI WhatsApp servisi geçici olarak yanıt veremedi.'}
+        return {'success': False, 'error': fallback_err}
     except Exception:
         return {'success': False, 'error': 'Aslan AI WhatsApp bağlantı servisine ulaşılamadı.'}
 
@@ -205,11 +243,18 @@ def _is_affirmative(msg: str) -> bool:
     cleaned = re.sub(r'[.!?,:;]+$', '', low).strip()
     if cleaned in _YES_WORDS:
         return True
-    if any(n in cleaned for n in ('hayır', 'hayir', 'iptal', 'reddet', 'istemiyorum', 'vazgeç')):
+    if any(n in cleaned for n in (
+        'hayır', 'hayir', 'iptal', 'reddet', 'reddediyorum', 'istemiyorum',
+        'vazgeç', 'vazgec', 'vermiyorum', 'onaylamıyorum', 'onaylamiyorum',
+        'gönderme', 'gonderme', 'oluşturma', 'olusturma', 'olmaz',
+    )):
         return False
     return any(p in cleaned for p in (
         'onaylıyorum', 'onayliyorum', 'kabul ediyorum', 'izin veriyorum',
         'evet', 'onay', 'tamam', 'devam', 'bağlandım', 'baglandim',
+        'kodu al', 'kodu ver', 'kodu gönder', 'kodu gonder',
+        'kodu oluştur', 'kodu olustur', 'olur', 'peki', 'tabii', 'tabi',
+        'başlat', 'baslat', 'oluştur', 'olustur',
     ))
 
 
@@ -700,13 +745,13 @@ def handle_chat_turn(username_lower: str, message: str, consume_credit_fn=None):
             database.save_user_wa_bot(username_lower, wa_state)
             return True, (
                 "⏳ **Önemli Hatırlatma:** Üretilecek **8 haneli eşleştirme kodunun (pairing code) geçerlilik süresi çok kısadır** (yaklaşık 60 saniye içinde telefonunuza girmeniz gerekir).\n\n"
-                "**Kodu almayı onaylıyor musunuz?** (**Onaylıyorum** / **İptal**)"
+                "**Kodu almayı onaylıyor musunuz?** (**Onaylıyorum / Evet / İzin veriyorum / Tamam** veya **İptal**)"
             ), {'type': 'code_confirm_prompt', 'stage': 'awaiting_code_confirm'}, False
 
         if stage == 'awaiting_code_confirm':
             if not _is_affirmative(msg):
                 return True, (
-                    "Hazır olduğunuzda **Onaylıyorum** yazarak 8 haneli kodu oluşturabilir veya **İptal** diyebilirsiniz."
+                    "Hazır olduğunuzda **Onaylıyorum**, **Evet**, **İzin veriyorum**, **Tamam** veya **Kabul ediyorum** yazarak 8 haneli kodu oluşturabilir; istemiyorsanız **İptal** diyebilirsiniz."
                 ), {'type': 'code_confirm_prompt', 'stage': 'awaiting_code_confirm'}, False
             wa_state['code_confirmed'] = True
             pair_res = call_wa_worker(
@@ -722,7 +767,7 @@ def handle_chat_turn(username_lower: str, message: str, consume_credit_fn=None):
             if not pair_res.get('success'):
                 database.save_user_wa_bot(username_lower, wa_state)
                 return True, (
-                    "⚠️ %s Hazır olduğunuzda tekrar **Onaylıyorum** yazabilirsiniz."
+                    "⚠️ %s Hazır olduğunuzda tekrar **Onaylıyorum** veya **Evet** yazabilirsiniz."
                     % pair_res.get('error', 'Eşleştirme kodu şu an alınamadı.')
                 ), {'type': 'pairing_retry'}, False
 

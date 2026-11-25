@@ -16,3 +16,4 @@ data/
 src/
 scripts/
 worker/
+node_modules/

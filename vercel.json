@@ -4,7 +4,10 @@
     "api/index.py": {
       "maxDuration": 60,
       "includeFiles": "core/**",
-      "excludeFiles": "{public/**,src/**,scripts/**,worker/**,test_*.py,server*.py,README.md,start.sh,data/**}"
+      "excludeFiles": "{public/**,src/**,scripts/**,worker/**,node_modules/**,test_*.py,server*.py,README.md,start.sh,data/**}"
+    },
+    "api/wa_bridge.mjs": {
+      "maxDuration": 300
     }
   },
   "headers": [
@@ -67,6 +70,8 @@
     }
   ],
   "rewrites": [
+    { "source": "/api/wa_bridge", "destination": "/api/wa_bridge.mjs" },
+    { "source": "/api/wa_bridge/:path*", "destination": "/api/wa_bridge.mjs?__wa_path=/:path*" },
     { "source": "/api/:path*", "destination": "/api/index.py?__route=/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],

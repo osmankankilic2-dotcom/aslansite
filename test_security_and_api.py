@@ -459,6 +459,7 @@ def main():
     js_targets = sorted([str(p) for p in (ROOT / "src" / "js").glob("*.js")]) + [
         str(ROOT / "public" / "assets" / "app.min.js"),
         str(ROOT / "public" / "sw.js"),
+        str(ROOT / "api" / "wa_bridge.mjs"),
     ]
     js_ok = True
     js_err = ""
@@ -468,13 +469,25 @@ def main():
             js_ok = False
             js_err = f"{jt}: {nc.stderr[:180]}"
             break
-    check("All modular src/js/*.js, app.min.js & sw.js syntax valid", js_ok, js_err)
+    check("All modular src/js/*.js, app.min.js, sw.js & api/wa_bridge.mjs syntax valid", js_ok, js_err)
 
     vj_raw = (ROOT / "vercel.json").read_text(encoding="utf-8")
     vj = json.loads(vj_raw)
-    check("vercel.json rewrites /api/:path* -> /api/index.py & single api/*.py",
+    rw_sources = [r.get("source") for r in vj.get("rewrites", [])]
+    wa_rw_ok = (
+        "/api/wa_bridge" in rw_sources
+        and "/api/wa_bridge/:path*" in rw_sources
+        and "/api/:path*" in rw_sources
+        and rw_sources.index("/api/wa_bridge/:path*") < rw_sources.index("/api/:path*")
+        and rw_sources.index("/api/wa_bridge") < rw_sources.index("/api/:path*")
+    )
+    fn_cfg = vj.get("functions", {})
+    check("vercel.json rewrites /api/wa_bridge & /api/:path*, excludes node_modules, single api/*.py",
           any(r.get("source") == "/api/:path*" and str(r.get("destination", "")).startswith("/api/index.py")
               for r in vj.get("rewrites", []))
+          and wa_rw_ok
+          and "api/wa_bridge.mjs" in fn_cfg
+          and "node_modules/**" in str(fn_cfg.get("api/index.py", {}).get("excludeFiles", ""))
           and len(list((ROOT / "api").glob("*.py"))) == 1)
     check("vercel.json enforces strict CSP (no unsafe-inline) & /sw.js headers",
           "'unsafe-inline'" not in vj_raw
@@ -1036,6 +1049,119 @@ def main():
               and "Bağlantınız başarılı" in js_txt
               and ".wa-pair-code" in css_txt
               and ".wa-copy-btn" in css_txt)
+
+        # 12.7 Expanded Turkish confirmations & natural phrases
+        from core import wa_bot, keepalive
+        check("WA _is_affirmative accepts natural phrases and blocks negatives",
+              all(wa_bot._is_affirmative(x) for x in ("Kodu al", "Kodu gönder", "Tamam, başlat", "Olur", "Onaylıyorum"))
+              and not any(wa_bot._is_affirmative(x) for x in ("Vazgectim", "İptal", "Hayır kodu gönderme")))
+
+        # 12.8 Built-in Vercel WA bridge URL, shared HMAC token, & keepalive target resolution
+        env_patch = {
+            "VERCEL": "1",
+            "VERCEL_ENV": "production",
+            "WA_BOT_WORKER_URL": "",
+            "WA_BOT_WORKER_TOKEN": "",
+            "MEDIA_WORKER_TOKEN": "",
+            "QUOTA_SIGNING_SECRET": "bridge-test-hmac-seed",
+            "VERCEL_PROJECT_PRODUCTION_URL": "",
+        }
+        with mock.patch.dict(os.environ, env_patch, clear=False), \
+             mock.patch.object(cfg, "WA_BOT_WORKER_URL", ""), \
+             mock.patch.object(cfg, "WA_BOT_WORKER_TOKEN", ""):
+            v_bridge_url, v_bridge_tok = wa_bot.get_worker_endpoint()
+            ka_targets = keepalive._collect_worker_targets()
+        check("Vercel mode resolves built-in /api/wa_bridge endpoint, HMAC token, & keepalive target",
+              v_bridge_url == "https://aslansite.vercel.app/api/wa_bridge"
+              and len(v_bridge_tok) == 64
+              and ("https://aslansite.vercel.app/api/wa_bridge/ping", v_bridge_tok) in ka_targets)
+
+        # 12.9 Direct ESM fetch() handler test of api/wa_bridge.mjs
+        bridge_script = (
+            "import bridge from './api/wa_bridge.mjs';\n"
+            "const unauthH = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/health'));\n"
+            "const unauthS = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/status?user_id=u1'));\n"
+            "const tok = process.env.TEST_BRIDGE_TOK;\n"
+            "const hRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/health', { headers: { 'x-worker-token': tok } }));\n"
+            "const hJson = await hRes.json();\n"
+            "const pRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/pair', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bridgeuser', phone: '905551234567', config: {} }) }));\n"
+            "const pJson = await pRes.json();\n"
+            "const mcRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/mock-connect', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bridgeuser' }) }));\n"
+            "const sRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/status?user_id=bridgeuser', { headers: { 'x-worker-token': tok } }));\n"
+            "const sJson = await sRes.json();\n"
+            "const cRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/config', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bridgeuser', config: { allow_groups: true, trigger_keywords: ['fiyat'] } }) }));\n"
+            "const cJson = await cRes.json();\n"
+            "const pgRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/ping', { headers: { 'x-worker-token': tok } }));\n"
+            "const pgJson = await pgRes.json();\n"
+            "const stRes = await bridge.fetch(new Request('https://aslansite.vercel.app/api/wa_bridge/wa/stop', { method: 'POST', headers: { 'x-worker-token': tok, 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'bridgeuser', logout: true }) }));\n"
+            "const stJson = await stRes.json();\n"
+            "console.log(JSON.stringify({ unauthH: unauthH.status, unauthS: unauthS.status, hSt: hRes.status, hJson, pSt: pRes.status, pJson, mcSt: mcRes.status, sSt: sRes.status, sJson, cSt: cRes.status, cJson, pgSt: pgRes.status, pgJson, stSt: stRes.status, stJson }));\n"
+        )
+        b_env = os.environ.copy()
+        b_env.pop("WA_BOT_WORKER_TOKEN", None)
+        b_env.pop("MEDIA_WORKER_TOKEN", None)
+        b_env["QUOTA_SIGNING_SECRET"] = "bridge-test-hmac-seed"
+        b_env["WA_MOCK_MODE"] = "1"
+        b_env["TEST_BRIDGE_TOK"] = v_bridge_tok
+        b_run = subprocess.run(
+            ["node", "--input-type=module", "-e", bridge_script],
+            cwd=str(ROOT), env=b_env, capture_output=True, text=True,
+        )
+        b_out = {}
+        if b_run.returncode == 0 and b_run.stdout.strip():
+            try:
+                b_out = json.loads(b_run.stdout.strip().splitlines()[-1])
+            except Exception:
+                b_out = {}
+        check("Vercel api/wa_bridge.mjs fetch() handles auth, pair, mock-connect, status, config, ping & stop",
+              b_run.returncode == 0
+              and b_out.get("unauthH") == 401
+              and b_out.get("unauthS") == 401
+              and b_out.get("hSt") == 200 and b_out.get("hJson", {}).get("ipv4") is True
+              and b_out.get("pSt") == 200 and len(b_out.get("pJson", {}).get("pairing_code", "")) == 8
+              and b_out.get("mcSt") == 200 and b_out.get("sSt") == 200 and b_out.get("sJson", {}).get("connected") is True
+              and b_out.get("cSt") == 200 and "fiyat" in (b_out.get("cJson", {}).get("config", {}).get("trigger_keywords") or [])
+              and b_out.get("pgSt") == 200 and b_out.get("pgJson", {}).get("ok") is True
+              and b_out.get("stSt") == 200 and b_out.get("stJson", {}).get("stopped") is True,
+              (b_run.stdout + b_run.stderr)[:220])
+
+        # 12.10 Unconfigured warning completely removed, writable /tmp storage & flexible Step 4 phrases
+        wa_bot_src = (ROOT / "core" / "wa_bot.py").read_text(encoding="utf-8")
+        wa_bridge_src = (ROOT / "api" / "wa_bridge.mjs").read_text(encoding="utf-8")
+        wa_rt_check_src = (wa_dir / "bot_runtime.mjs").read_text(encoding="utf-8")
+        check("WA modules completely remove 'yapılandırılmamış' fallback and use os.tmpdir() on Vercel",
+              "yapılandırılmamış" not in wa_bot_src.lower()
+              and "yapilandirilmamis" not in wa_bot_src.lower()
+              and "yapılandırılmamış" not in wa_bridge_src.lower()
+              and "os.tmpdir()" in wa_bridge_src
+              and "aslan_wa_sessions" in wa_bridge_src
+              and "os.tmpdir()" in wa_rt_check_src)
+
+        flex_words = ("izin veriyorum", "evet", "tamam", "kabul ediyorum", "onaylıyorum")
+        flex_ok = True
+        flex_bad = ""
+        for idx_fw, fw in enumerate(flex_words):
+            r_fu = client.post("/api/auth/register", json={
+                "username": f"WaFlex{idx_fw}User", "password": good_pw, "password_confirm": good_pw
+            })
+            f_hdrs = {"Authorization": f"Bearer {r_fu.get_json()['token']}"}
+            f1 = client.post("/api/ai", json={"message": "WhatsApp botu yapabilir misin?"}, headers=f_hdrs)
+            f2 = client.post("/api/ai", json={"message": "Onaylıyorum"}, headers=f_hdrs)
+            f3 = client.post("/api/ai", json={"message": "+90 555 000 11 22"}, headers=f_hdrs)
+            f4 = client.post("/api/ai", json={"message": "İzin veriyorum"}, headers=f_hdrs)
+            f5 = client.post("/api/ai", json={"message": fw}, headers=f_hdrs)
+            f5j = f5.get_json() or {}
+            ev5f = f5j.get("wa_event") or {}
+            if not (f1.status_code == 200 and f2.status_code == 200 and f3.status_code == 200
+                    and f4.status_code == 200 and f5.status_code == 200
+                    and ev5f.get("type") == "pairing_code"
+                    and len(ev5f.get("code", "")) == 8
+                    and f5j["quota"]["ai"]["remaining"] == 4):
+                flex_ok = False
+                flex_bad = f"{fw} -> {f5j}"
+                break
+        check("Step 4 flexible confirmations (izin veriyorum/evet/tamam/kabul ediyorum/onaylıyorum) generate 8-char code (total 1 credit)",
+              flex_ok, flex_bad)
     finally:
         if old_wa_url is None:
             os.environ.pop("WA_BOT_WORKER_URL", None)

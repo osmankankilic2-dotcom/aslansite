@@ -1,0 +1,14 @@
+{
+  "name": "aslansite",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@hapi/boom": "^9.1.3",
+    "@vercel/functions": "^2.2.1",
+    "@whiskeysockets/baileys": "6.7.24",
+    "pino": "^9.6.0"
+  },
+  "overrides": {
+    "libsignal": "^6.0.0"
+  }
+}

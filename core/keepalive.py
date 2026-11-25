@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.request
 
-from . import config as cfg
+from . import config as cfg, wa_bot
 
 _WAKE_LOCK = threading.Lock()
 _LAST_WAKE_TS = 0.0
@@ -16,18 +16,9 @@ _MIN_WAKE_INTERVAL = 30.0
 
 def _collect_worker_targets() -> list:
     targets = []
-    wa_url = (os.environ.get('WA_BOT_WORKER_URL') or cfg.WA_BOT_WORKER_URL or '').strip().rstrip('/')
-    if not wa_url and not os.environ.get('VERCEL'):
-        wa_port = int(os.environ.get('WA_WORKER_PORT') or cfg.WA_BOT_LOCAL_PORT or 5056)
-        wa_url = 'http://127.0.0.1:%d' % wa_port
+    wa_url, wa_tok = wa_bot.get_worker_endpoint()
     if wa_url:
-        wa_tok = (
-            os.environ.get('WA_BOT_WORKER_TOKEN')
-            or os.environ.get('MEDIA_WORKER_TOKEN')
-            or cfg.WA_BOT_WORKER_TOKEN
-            or ''
-        ).strip()
-        targets.append((wa_url + '/ping', wa_tok))
+        targets.append((wa_url.rstrip('/') + '/ping', wa_tok))
 
     media_url = (os.environ.get('MEDIA_WORKER_URL') or cfg.MEDIA_WORKER_URL or '').strip().rstrip('/')
     if media_url:
@@ -38,13 +29,14 @@ def _collect_worker_targets() -> list:
 
 
 def _ping_targets_sync(targets: list) -> None:
+    req_timeout = 4.0 if os.environ.get('VERCEL') else 1.5
     for url, tok in targets:
         try:
             headers = {'User-Agent': 'Aslan-AI-KeepAlive/1.0'}
             if tok:
                 headers['X-Worker-Token'] = tok
             req = urllib.request.Request(url, headers=headers, method='GET')
-            with urllib.request.urlopen(req, timeout=1.5):
+            with urllib.request.urlopen(req, timeout=req_timeout):
                 pass
         except Exception:
             pass
